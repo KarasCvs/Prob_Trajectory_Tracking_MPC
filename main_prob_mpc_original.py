@@ -16,7 +16,7 @@ from reference_trajectory import ReferenceTrajectoryGenerator
 from prob_mpc.gp_trajectory import GaussianProcessTrajectory
 
 
-def main(num_replanning: int = 0, debug: bool = False, trajectory_type: str = 'rollercoaster'):
+def main(num_replanning: int = 0, debug: bool = False, trajectory_type: str = 'rollercoaster', dimension: int = 3, estimate_velocity: bool = True):
     """
     主函数：概率模型轨迹跟踪 MPC 仿真
     
@@ -24,15 +24,20 @@ def main(num_replanning: int = 0, debug: bool = False, trajectory_type: str = 'r
         num_replanning: 重新规划次数（概率模型中，重规划仅体现为时间推进，GP自动提供连续轨迹）
         debug: 是否使用debug模式（减少GP训练迭代次数）
         trajectory_type: 轨迹类型 ('spiral' 或 'rollercoaster')
+        dimension: 状态空间维度（默认3，表示3D空间）
+        estimate_velocity: 是否估计速度（默认True。True=从位置估计，False=假设完全可观测）
     """
     print("=" * 60)
-    print("概率模型轨迹跟踪 MPC 仿真")
+    print("概率模型轨迹跟踪 MPC 仿真（一阶系统）")
     print("=" * 60)
     print(f"重新规划次数: {num_replanning}")
+    print(f"状态空间维度: {dimension}")
+    print(f"控制模式: 一阶系统（状态=位置，控制输入=期望速度，p_dot=u）")
+    print(f"注意: estimate_velocity参数已废弃，系统现在是一阶系统，不会产生旋转")
 
     # ========== 1. 创建系统模型 ==========
     print("\n[1/7] 创建概率系统模型...")
-    model = template_prob_model('SX')
+    model = template_prob_model('SX', dimension=dimension)
     print(f"   状态维度: {model.n_x}")
     print(f"   输入维度: {model.n_u}")
 
@@ -44,10 +49,12 @@ def main(num_replanning: int = 0, debug: bool = False, trajectory_type: str = 'r
     np.random.seed(42)
 
     # 定义起点和终点的多维高斯分布
-    start_mean = np.array([0.0, 0.0, 0.0])
+    start_mean = np.zeros(dimension)
+    start_mean[:3] = [0.0, 0.0, 0.0]  # 前3维用于3D空间
     start_std = 0.05  # 标准差 0.05m
     start_cov = start_std**2
-    end_mean = np.array([1.0, 1.0, 1.0])
+    end_mean = np.zeros(dimension)
+    end_mean[:3] = [1.0, 1.0, 1.0]  # 前3维用于3D空间
     end_std = 0.05
     end_cov = end_std**2
 
@@ -74,7 +81,8 @@ def main(num_replanning: int = 0, debug: bool = False, trajectory_type: str = 'r
             trajectory_type='rollercoaster',
             circle_radius=0.3,
             circle_plane='vertical',
-            circle_ratio=0.6
+            circle_ratio=0.6,
+            dimension=dimension
         )
     else:  # 'spiral'
         print(f"   轨迹类型: 螺旋轨迹")
@@ -91,7 +99,8 @@ def main(num_replanning: int = 0, debug: bool = False, trajectory_type: str = 'r
             base_num_turns=2.0,
             noise_scale=0.3,
             convergence_start=0.8,
-            convergence_length=0.2
+            convergence_length=0.2,
+            dimension=dimension
         )
 
     # ========== 3. 时间归一化 ==========
@@ -111,7 +120,7 @@ def main(num_replanning: int = 0, debug: bool = False, trajectory_type: str = 'r
 
     # ========== 4. 训练GP模型 ==========
     print("\n[4/7] 训练高斯过程模型...")
-    gp_traj = GaussianProcessTrajectory(normalize_time=True)
+    gp_traj = GaussianProcessTrajectory(normalize_time=True, dimension=dimension)
     max_iters = 10 if debug else 200
     if debug:
         print(f"   Debug模式: GP训练仅进行 {max_iters} 次迭代")
@@ -169,14 +178,14 @@ def main(num_replanning: int = 0, debug: bool = False, trajectory_type: str = 'r
         print(f"   实际终点均值: {actual_end_mean}")
         print(f"   将在最后一个时间步使用实际终点均值（更可靠）")
     
-    x0 = np.array([
-        actual_start_mean[0],  # p_x
-        actual_start_mean[1],  # p_y
-        actual_start_mean[2],  # p_z
-        0.0,  # v_x
-        0.0,  # v_y
-        0.0  # v_z
-    ]).reshape(-1, 1)
+    # 构建初始状态向量：只有位置（一阶系统）
+    x0_list = []
+    for i in range(dimension):
+        if i < len(actual_start_mean):
+            x0_list.append(actual_start_mean[i])  # 位置
+        else:
+            x0_list.append(0.0)
+    x0 = np.array(x0_list).reshape(-1, 1)
 
     mpc.x0 = x0
     simulator.x0 = x0
@@ -199,6 +208,24 @@ def main(num_replanning: int = 0, debug: bool = False, trajectory_type: str = 'r
 
     x_current = x0.copy()
     current_time = 0.0
+
+    # 先记录初始状态（用于可视化起点）
+    actual_trajectory.append(x0.flatten())
+    # 记录初始GP均值和方差
+    gp_mean_trajectory.append(actual_start_mean.copy())
+    gp_variance_initial = gp_traj.predict_variance(0.0)
+    if len(gp_variance_initial) < dimension:
+        gp_variance_initial = np.pad(gp_variance_initial, (0, dimension - len(gp_variance_initial)), 'constant', constant_values=1e-6)
+    gp_variance_history.append(gp_variance_initial[:dimension])
+    # 计算初始权重
+    trace_sigma_initial = np.sum(gp_variance_initial[:dimension])
+    threshold = 0.1
+    alpha_initial = threshold / (threshold + trace_sigma_initial)
+    alpha_initial = np.clip(alpha_initial, 0.01, 1.0)
+    alpha_history.append(alpha_initial)
+    # 初始控制输入为0
+    control_inputs.append(np.zeros(dimension))
+    time_history.append(0.0)
 
     print(f"   仿真步数: {n_steps}")
     print(f"   开始仿真循环...\n")
@@ -248,10 +275,12 @@ def main(num_replanning: int = 0, debug: bool = False, trajectory_type: str = 'r
         y_next = simulator.make_step(u0)
 
         # ========== 状态更新 ==========
+        # 真实场景：只能观测到位置，状态就是位置（一阶系统）
+        # 从仿真器获取状态（现在只有位置）
         x_current = y_next
         
         # ========== 数据记录 ==========
-        actual_trajectory.append(x_current[:3].flatten())
+        actual_trajectory.append(x_current.flatten())  # 位置（所有维度，现在状态就是位置）  # 位置（所有维度）
         
         # 查询GP均值和方差（用于可视化）
         # 注意：在t=0和t=1时，GP预测可能不准确，使用实际起点/终点均值更可靠
@@ -282,7 +311,9 @@ def main(num_replanning: int = 0, debug: bool = False, trajectory_type: str = 'r
 
         # 进度显示
         if (k + 1) % 20 == 0:
-            pos_error = np.linalg.norm(x_current[:3].flatten() - gp_mean)
+            # 确保维度匹配
+            gp_mean_aligned = gp_mean[:dimension] if len(gp_mean) >= dimension else np.pad(gp_mean, (0, dimension - len(gp_mean)), 'constant')
+            pos_error = np.linalg.norm(x_current[:dimension].flatten() - gp_mean_aligned)
             avg_gp_time = np.mean(gp_times[-20:]) * 1000  # 最近20步的平均GP时间（ms）
             avg_mpc_time = np.mean(mpc_times[-20:]) * 1000  # 最近20步的平均MPC时间（ms）
             # 显示当前alpha值（用于调试）
@@ -334,7 +365,8 @@ def main(num_replanning: int = 0, debug: bool = False, trajectory_type: str = 'r
         all_trajectories,
         gp_traj,
         trajectory_duration,
-        reference_target_end=gp_end_mean
+        reference_target_end=gp_end_mean,
+        dimension=dimension
     )
 
     print("\n" + "=" * 60)
@@ -352,27 +384,40 @@ def visualize_prob_results(
     all_trajectories: List[Tuple[np.ndarray, np.ndarray]],
     gp_trajectory: GaussianProcessTrajectory,
     trajectory_duration: float,
-    reference_target_end: np.ndarray = None
+    reference_target_end: np.ndarray = None,
+    dimension: int = 3
 ):
     """
     可视化概率模型仿真结果
     
     Args:
-        actual_traj: 实际执行轨迹 [N, 3]
-        gp_mean_traj: GP均值轨迹 [N, 3]
-        gp_variance_history: GP方差历史 [N, 3]
+        actual_traj: 实际执行轨迹 [N, dimension]
+        gp_mean_traj: GP均值轨迹 [N, dimension]
+        gp_variance_history: GP方差历史 [N, dimension]
         alpha_history: 权重历史 [N]
-        control_inputs: 控制输入历史 [N, 3]
+        control_inputs: 控制输入历史 [N, dimension]
         time_history: 时间历史 [N]
         all_trajectories: 所有生成的参考轨迹列表
         gp_trajectory: GP轨迹模型
         trajectory_duration: 轨迹持续时间
-        reference_target_end: 参考目标终点
+        reference_target_end: 参考目标终点 [dimension]
+        dimension: 状态空间维度（默认3）
     """
-    fig = plt.figure(figsize=(18, 12))
+    # 计算需要的子图数量
+    num_extra_dims = max(0, dimension - 3)
+    
+    # 基础布局：2x3，如果有额外维度，增加行数
+    if num_extra_dims > 0:
+        n_rows = 2 + (num_extra_dims + 2) // 3  # 每行3个图
+        n_cols = 3
+        fig = plt.figure(figsize=(18, 6 * n_rows))
+    else:
+        n_rows = 2
+        n_cols = 3
+        fig = plt.figure(figsize=(18, 12))
 
-    # ========== 3D Trajectory Plot ==========
-    ax1 = fig.add_subplot(2, 3, 1, projection='3d')
+    # ========== 3D Trajectory Plot (只显示前3维 x, y, z) ==========
+    ax1 = fig.add_subplot(n_rows, n_cols, 1, projection='3d')
 
     # Plot all reference trajectories (示例轨迹)
     if all_trajectories is not None:
@@ -424,8 +469,8 @@ def visualize_prob_results(
     ax1.legend()
     ax1.grid(True)
 
-    # ========== X-Y Plane Projection ==========
-    ax2 = fig.add_subplot(2, 3, 2)
+    # ========== X-Y Plane Projection (只显示前2维 x, y) ==========
+    ax2 = fig.add_subplot(n_rows, n_cols, 2)
     
     if all_trajectories is not None:
         for i, (traj, _) in enumerate(all_trajectories):
@@ -453,29 +498,36 @@ def visualize_prob_results(
     ax2.axis('equal')
 
     # ========== Position Tracking Error ==========
-    ax3 = fig.add_subplot(2, 3, 3)
+    ax3 = fig.add_subplot(n_rows, n_cols, 3)
     position_error = np.linalg.norm(actual_traj - gp_mean_traj, axis=1)
     ax3.plot(time_history, position_error, 'r-', linewidth=2)
     ax3.set_xlabel('Time (s)')
     ax3.set_ylabel('Position Error (m)')
-    ax3.set_title('Position Tracking Error (vs GP Mean)')
+    ax3.set_title('Position Tracking Error (All Dimensions)')
     ax3.grid(True)
 
     # ========== GP Variance (Uncertainty) ==========
-    ax4 = fig.add_subplot(2, 3, 4)
-    total_variance = np.sum(gp_variance_history, axis=1)
+    ax4 = fig.add_subplot(n_rows, n_cols, 4)
+    total_variance = np.sum(gp_variance_history[:, :dimension], axis=1)
     ax4.plot(time_history, total_variance, 'b-', linewidth=2, label='Total Variance')
-    ax4.plot(time_history, gp_variance_history[:, 0], 'r--', linewidth=1, alpha=0.7, label='σ²_x')
-    ax4.plot(time_history, gp_variance_history[:, 1], 'g--', linewidth=1, alpha=0.7, label='σ²_y')
-    ax4.plot(time_history, gp_variance_history[:, 2], 'm--', linewidth=1, alpha=0.7, label='σ²_z')
+    # 只显示前3维的方差
+    dim_names = ['x', 'y', 'z'] + [chr(ord('a') + i) for i in range(max(0, dimension - 3))]
+    if dimension > 26:
+        dim_names = ['x', 'y', 'z'] + [f'd{i}' for i in range(3, dimension)]
+    colors = ['r', 'g', 'm', 'c', 'y', 'orange', 'purple', 'brown', 'pink']
+    for i in range(min(3, dimension)):
+        if i < gp_variance_history.shape[1]:
+            ax4.plot(time_history, gp_variance_history[:, i], 
+                    colors[i % len(colors)] + '--', linewidth=1, alpha=0.7, 
+                    label=f'σ²_{dim_names[i]}')
     ax4.set_xlabel('Time (s)')
     ax4.set_ylabel('Variance')
-    ax4.set_title('GP Variance (Uncertainty)')
+    ax4.set_title('GP Variance (Uncertainty) - First 3 Dims')
     ax4.legend()
     ax4.grid(True)
 
     # ========== Weight α(t) ==========
-    ax5 = fig.add_subplot(2, 3, 5)
+    ax5 = fig.add_subplot(n_rows, n_cols, 5)
     ax5.plot(time_history, alpha_history, 'g-', linewidth=2, label='α(t)')
     # 添加参考线：alpha=0.5（平衡点）
     if len(time_history) > 0:
@@ -492,16 +544,75 @@ def visualize_prob_results(
             ax5.set_ylim([max(0, alpha_min - 0.1), min(1.1, alpha_max + 0.1)])
     ax5.legend()
 
-    # ========== Control Input ==========
-    ax6 = fig.add_subplot(2, 3, 6)
-    ax6.plot(time_history, control_inputs[:, 0], 'r-', label='a_x', linewidth=2)
-    ax6.plot(time_history, control_inputs[:, 1], 'g-', label='a_y', linewidth=2)
-    ax6.plot(time_history, control_inputs[:, 2], 'b-', label='a_z', linewidth=2)
+    # ========== Control Input (前3维) ==========
+    ax6 = fig.add_subplot(n_rows, n_cols, 6)
+    colors_ctrl = ['r', 'g', 'b', 'm', 'c', 'y', 'orange', 'purple', 'brown', 'pink']
+    for i in range(min(3, dimension)):
+        if i < control_inputs.shape[1]:
+            ax6.plot(time_history, control_inputs[:, i], 
+                    colors_ctrl[i % len(colors_ctrl)] + '-', 
+                    label=f'u_{dim_names[i]}', linewidth=2)
     ax6.set_xlabel('Time (s)')
-    ax6.set_ylabel('Acceleration (m/s²)')
-    ax6.set_title('Control Input')
+    ax6.set_ylabel('Desired Velocity (m/s)')
+    ax6.set_title('Control Input (First 3 Dimensions)')
     ax6.legend()
     ax6.grid(True)
+    
+    # ========== 额外维度的可视化 ==========
+    if num_extra_dims > 0:
+        plot_idx = 7  # 从第7个位置开始
+        for dim_idx in range(3, dimension):
+            row = (plot_idx - 1) // n_cols + 1
+            col = (plot_idx - 1) % n_cols + 1
+            ax = fig.add_subplot(n_rows, n_cols, plot_idx)
+            
+            # 绘制该维度的轨迹
+            if dim_idx < actual_traj.shape[1]:
+                ax.plot(time_history, actual_traj[:, dim_idx], 
+                       'r-', linewidth=2, label=f'Actual (dim {dim_idx})')
+            if dim_idx < gp_mean_traj.shape[1]:
+                ax.plot(time_history, gp_mean_traj[:, dim_idx], 
+                       'b--', linewidth=1.5, alpha=0.7, label=f'GP Mean (dim {dim_idx})')
+            
+            # 绘制该维度的方差
+            if dim_idx < gp_variance_history.shape[1]:
+                ax2_twin = ax.twinx()
+                ax2_twin.plot(time_history, gp_variance_history[:, dim_idx], 
+                             'g-', linewidth=1.5, alpha=0.6, label=f'Variance (dim {dim_idx})')
+                ax2_twin.set_ylabel('Variance', color='g')
+                ax2_twin.tick_params(axis='y', labelcolor='g')
+            
+            # 绘制该维度的控制输入
+            if dim_idx < control_inputs.shape[1]:
+                if dim_idx < gp_variance_history.shape[1]:
+                    # 如果已经有twinx，使用另一个twinx
+                    ax3_twin = ax.twinx()
+                    ax3_twin.spines['right'].set_position(('outward', 60))
+                    ax3_twin.plot(time_history, control_inputs[:, dim_idx], 
+                                 'm-', linewidth=1.5, alpha=0.6, label=f'Control (dim {dim_idx})')
+                    ax3_twin.set_ylabel('Desired Velocity (m/s)', color='m')
+                    ax3_twin.tick_params(axis='y', labelcolor='m')
+                else:
+                    ax2_twin = ax.twinx()
+                    ax2_twin.plot(time_history, control_inputs[:, dim_idx], 
+                                 'm-', linewidth=1.5, alpha=0.6, label=f'Control (dim {dim_idx})')
+                    ax2_twin.set_ylabel('Desired Velocity (m/s)', color='m')
+                    ax2_twin.tick_params(axis='y', labelcolor='m')
+            
+            ax.set_xlabel('Time (s)')
+            ax.set_ylabel(f'Position (dim {dim_idx})', color='b')
+            ax.set_title(f'Dimension {dim_idx} ({dim_names[dim_idx] if dim_idx < len(dim_names) else f"d{dim_idx}"})')
+            ax.tick_params(axis='y', labelcolor='b')
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc='upper left')
+            if dim_idx < gp_variance_history.shape[1]:
+                ax2_twin.legend(loc='upper right')
+            if dim_idx < control_inputs.shape[1] and dim_idx < gp_variance_history.shape[1]:
+                ax3_twin.legend(loc='lower right')
+            elif dim_idx < control_inputs.shape[1]:
+                ax2_twin.legend(loc='upper right')
+            
+            plot_idx += 1
 
     plt.tight_layout()
     plt.savefig('probabilistic_trajectory_tracking_result.png', dpi=150, bbox_inches='tight')

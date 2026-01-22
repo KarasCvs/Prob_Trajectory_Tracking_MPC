@@ -19,6 +19,10 @@ def template_simulator(model, tvp_data_dict=None):
     Returns:
         simulator: 配置好的仿真器
     """
+    # 获取维度信息
+    dimension = getattr(model, 'dimension', 3)
+    dim_names = getattr(model, 'dim_names', ['x', 'y', 'z'])
+    
     simulator = do_mpc.simulator.Simulator(model)
     
     # 设置仿真参数
@@ -60,27 +64,35 @@ def template_simulator(model, tvp_data_dict=None):
             # 确保 ref_point 是 numpy 数组并展平，然后转换为 Python 标量
             ref_point = np.array(ref_point).flatten()
             
-            # 设置 TVP 值（确保是标量）
-            tvp_num['p_x_ref'] = float(ref_point[0])
-            tvp_num['p_y_ref'] = float(ref_point[1])
-            tvp_num['p_z_ref'] = float(ref_point[2])
-            
-            # 速度参考（简化处理）
-            tvp_num['v_x_ref'] = 0.0
-            tvp_num['v_y_ref'] = 0.0
-            tvp_num['v_z_ref'] = 0.0
+            # 设置 TVP 值（确保是标量，支持可变维度）
+            # 只设置位置参考，不需要速度参考
+            for i, dim_name in enumerate(dim_names):
+                if i < len(ref_point):
+                    tvp_num[f'p_{dim_name}_ref'] = float(ref_point[i])
+                else:
+                    tvp_num[f'p_{dim_name}_ref'] = 0.0
         else:
             # 默认值
-            tvp_num['p_x_ref'] = 0.0
-            tvp_num['p_y_ref'] = 0.0
-            tvp_num['p_z_ref'] = 0.0
-            tvp_num['v_x_ref'] = 0.0
-            tvp_num['v_y_ref'] = 0.0
-            tvp_num['v_z_ref'] = 0.0
+            for dim_name in dim_names:
+                tvp_num[f'p_{dim_name}_ref'] = 0.0
         
         return tvp_num
     
     simulator.set_tvp_fun(tvp_fun)
+    
+    # 设置参数函数（用于前一个控制输入）
+    # 仿真器的 get_p_template() 不需要 n_combinations 参数
+    # 使用可更新的字典存储前一个控制输入（初始值为0）
+    simulator._p_data = {}
+    for dim_name in dim_names:
+        simulator._p_data[f'u_{dim_name}_prev'] = 0.0  # 初始值
+    
+    def p_fun(t_now):
+        p_num = simulator.get_p_template()  # 仿真器不需要 n_combinations 参数
+        for dim_name in dim_names:
+            p_num[f'u_{dim_name}_prev'] = simulator._p_data[f'u_{dim_name}_prev']
+        return p_num
+    simulator.set_p_fun(p_fun)
     
     # 将数据字典附加到仿真器对象（便于后续更新）
     simulator._tvp_data = tvp_data_dict

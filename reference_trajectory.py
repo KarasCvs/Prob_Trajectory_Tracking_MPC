@@ -33,7 +33,8 @@ class ReferenceTrajectoryGenerator:
         duration: float,
         num_points: int,
         spiral_radius: float = 1.0,
-        num_turns: float = 2.0
+        num_turns: float = 2.0,
+        dimension: int = 3
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         生成螺旋轨迹
@@ -41,44 +42,58 @@ class ReferenceTrajectoryGenerator:
         从起点螺旋式到达目标点，保持轨迹形状约束
         
         Args:
-            start: 起点 [x, y, z]
-            target: 目标点 [x, y, z]
+            start: 起点 [x, y, z, ...]
+            target: 目标点 [x, y, z, ...]
             duration: 轨迹持续时间（秒）
             num_points: 轨迹点数量
             spiral_radius: 螺旋半径
             num_turns: 螺旋圈数
+            dimension: 状态空间维度（默认3）
             
         Returns:
-            trajectory: 轨迹点数组 [num_points, 3]
+            trajectory: 轨迹点数组 [num_points, dimension]
             time_stamps: 时间戳数组 [num_points]
         """
         start = np.array(start).flatten()
         target = np.array(target).flatten()
         
+        # 确保维度匹配
+        if len(start) < dimension:
+            start = np.pad(start, (0, dimension - len(start)), 'constant')
+        if len(target) < dimension:
+            target = np.pad(target, (0, dimension - len(target)), 'constant')
+        
+        # 只使用前3维进行3D轨迹生成
+        start_3d = start[:3]
+        target_3d = target[:3]
+        
         # 时间参数
         t = np.linspace(0, duration, num_points)
         
-        # 计算起点到终点的方向向量
-        direction = target - start
+        # 计算起点到终点的方向向量（3D）
+        direction = target_3d - start_3d
         distance = np.linalg.norm(direction)
         
         if distance < 1e-6:
-            # 起点和终点相同，返回静态轨迹
-            trajectory = np.tile(start, (num_points, 1))
+            # 起点和终点相同，返回静态轨迹（线性插值所有维度）
+            trajectory = np.zeros((num_points, dimension))
+            for i, t_i in enumerate(t):
+                s = t_i / duration
+                trajectory[i] = start + s * (target - start)
             return trajectory, t
         
         # 归一化方向向量
         direction_unit = direction / distance
         
         # 生成螺旋轨迹
-        trajectory = np.zeros((num_points, 3))
+        trajectory = np.zeros((num_points, dimension))
         
         for i, t_i in enumerate(t):
             # 归一化时间 [0, 1]
             s = t_i / duration
             
-            # 沿主方向的线性进展
-            linear_progress = start + s * direction
+            # 沿主方向的线性进展（3D）
+            linear_progress_3d = start_3d + s * direction
             
             # 螺旋参数
             theta = 2 * np.pi * num_turns * s  # 角度
@@ -110,11 +125,15 @@ class ReferenceTrajectoryGenerator:
             v2 = np.cross(direction_unit, v1)
             v2 = v2 / (np.linalg.norm(v2) + 1e-10)
             
-            # 螺旋偏移
+            # 螺旋偏移（3D）
             spiral_offset = radius * (np.cos(theta) * v1 + np.sin(theta) * v2)
             
-            # 最终轨迹点
-            trajectory[i] = linear_progress + spiral_offset
+            # 前3维：使用螺旋轨迹
+            trajectory[i, :3] = linear_progress_3d + spiral_offset
+            
+            # 额外维度：线性插值
+            if dimension > 3:
+                trajectory[i, 3:] = start[3:] + s * (target[3:] - start[3:])
         
         return trajectory, t
     
@@ -126,7 +145,8 @@ class ReferenceTrajectoryGenerator:
         num_points: int,
         circle_radius: float = 0.3,
         circle_plane: str = 'vertical',
-        circle_ratio: float = 0.6
+        circle_ratio: float = 0.6,
+        dimension: int = 3
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         生成过山车轨迹
@@ -138,38 +158,52 @@ class ReferenceTrajectoryGenerator:
         所有轨迹走同一条平稳曲线，方差较小
         
         Args:
-            start: 起点 [x, y, z]
-            target: 目标点 [x, y, z]
+            start: 起点 [x, y, z, ...]
+            target: 目标点 [x, y, z, ...]
             duration: 轨迹持续时间（秒）
             num_points: 轨迹点数量
             circle_radius: 圆的半径
             circle_plane: 圆所在平面 ('vertical' 或 'horizontal')
             circle_ratio: 圆部分占整个轨迹的比例 [0, 1]，例如0.6表示60%时间用于画圆
+            dimension: 状态空间维度（默认3）
             
         Returns:
-            trajectory: 轨迹点数组 [num_points, 3]
+            trajectory: 轨迹点数组 [num_points, dimension]
             time_stamps: 时间戳数组 [num_points]
         """
         start = np.array(start).flatten()
         target = np.array(target).flatten()
         
+        # 确保维度匹配
+        if len(start) < dimension:
+            start = np.pad(start, (0, dimension - len(start)), 'constant')
+        if len(target) < dimension:
+            target = np.pad(target, (0, dimension - len(target)), 'constant')
+        
+        # 只使用前3维进行3D轨迹生成
+        start_3d = start[:3]
+        target_3d = target[:3]
+        
         # 时间参数
         t = np.linspace(0, duration, num_points)
         
-        # 计算起点到终点的方向向量
-        direction = target - start
+        # 计算起点到终点的方向向量（3D）
+        direction = target_3d - start_3d
         distance = np.linalg.norm(direction)
         
         if distance < 1e-6:
-            # 起点和终点相同，返回静态轨迹
-            trajectory = np.tile(start, (num_points, 1))
+            # 起点和终点相同，返回静态轨迹（线性插值所有维度）
+            trajectory = np.zeros((num_points, dimension))
+            for i, t_i in enumerate(t):
+                s = t_i / duration
+                trajectory[i] = start + s * (target - start)
             return trajectory, t
         
         # 归一化方向向量
         direction_unit = direction / distance
         
-        # 计算圆的中心点（在起点和终点的中点）
-        midpoint = (start + target) / 2
+        # 计算圆的中心点（在起点和终点的中点，3D）
+        midpoint = (start_3d + target_3d) / 2
         
         # 确定圆的法向量（垂直于圆所在平面）
         if circle_plane == 'vertical':
@@ -195,9 +229,9 @@ class ReferenceTrajectoryGenerator:
         v2 = np.cross(normal, v1)
         v2 = v2 / (np.linalg.norm(v2) + 1e-10)
         
-        # 计算圆的起点（从实际起点开始）
+        # 计算圆的起点（从实际起点开始，3D）
         # 圆的起点应该在从起点指向圆心的方向上
-        start_to_center = midpoint - start
+        start_to_center = midpoint - start_3d
         # 在圆平面内找到最接近start_to_center的方向
         start_dir_in_plane = start_to_center - np.dot(start_to_center, normal) * normal
         if np.linalg.norm(start_dir_in_plane) > 1e-6:
@@ -210,7 +244,7 @@ class ReferenceTrajectoryGenerator:
         start_angle = np.arctan2(np.dot(start_dir_in_plane, v2), np.dot(start_dir_in_plane, v1))
         
         # 生成轨迹
-        trajectory = np.zeros((num_points, 3))
+        trajectory = np.zeros((num_points, dimension))
         circle_end_idx = int(circle_ratio * num_points)
         
         for i, t_i in enumerate(t):
@@ -223,9 +257,13 @@ class ReferenceTrajectoryGenerator:
                 # 角度从start_angle到start_angle+2π
                 theta = start_angle + 2 * np.pi * s_circle
                 
-                # 圆上的点
-                circle_point = midpoint + circle_radius * (np.cos(theta) * v1 + np.sin(theta) * v2)
-                trajectory[i] = circle_point
+                # 圆上的点（3D）
+                circle_point_3d = midpoint + circle_radius * (np.cos(theta) * v1 + np.sin(theta) * v2)
+                trajectory[i, :3] = circle_point_3d
+                
+                # 额外维度：线性插值
+                if dimension > 3:
+                    trajectory[i, 3:] = start[3:] + s * (target[3:] - start[3:])
             else:
                 # 第二部分：从圆的终点平滑过渡到目标点
                 s_transition = (s - circle_ratio) / (1 - circle_ratio)  # [0, 1]
@@ -233,12 +271,16 @@ class ReferenceTrajectoryGenerator:
                 # 使用平滑过渡函数（三次函数）
                 smooth_s = s_transition ** 2 * (3 - 2 * s_transition)  # smoothstep函数
                 
-                # 圆的终点（在circle_ratio处，即theta = start_angle + 2π）
+                # 圆的终点（在circle_ratio处，即theta = start_angle + 2π，3D）
                 circle_end_angle = start_angle + 2 * np.pi
-                circle_end_point = midpoint + circle_radius * (np.cos(circle_end_angle) * v1 + np.sin(circle_end_angle) * v2)
+                circle_end_point_3d = midpoint + circle_radius * (np.cos(circle_end_angle) * v1 + np.sin(circle_end_angle) * v2)
                 
-                # 从圆的终点平滑过渡到目标点
-                trajectory[i] = circle_end_point + smooth_s * (target - circle_end_point)
+                # 前3维：从圆的终点平滑过渡到目标点
+                trajectory[i, :3] = circle_end_point_3d + smooth_s * (target_3d - circle_end_point_3d)
+                
+                # 额外维度：线性插值
+                if dimension > 3:
+                    trajectory[i, 3:] = start[3:] + s * (target[3:] - start[3:])
         
         # 确保起点和终点精确对齐
         trajectory[0] = start
@@ -251,26 +293,34 @@ class ReferenceTrajectoryGenerator:
         start: np.ndarray,
         target: np.ndarray,
         duration: float,
-        num_points: int
+        num_points: int,
+        dimension: int = 3
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         生成直线轨迹（用于对比）
         
         Args:
-            start: 起点 [x, y, z]
-            target: 目标点 [x, y, z]
+            start: 起点 [x, y, z, ...]
+            target: 目标点 [x, y, z, ...]
             duration: 轨迹持续时间
             num_points: 轨迹点数量
+            dimension: 状态空间维度（默认3）
             
         Returns:
-            trajectory: 轨迹点数组
+            trajectory: 轨迹点数组 [num_points, dimension]
             time_stamps: 时间戳数组
         """
         start = np.array(start).flatten()
         target = np.array(target).flatten()
         
+        # 确保维度匹配
+        if len(start) < dimension:
+            start = np.pad(start, (0, dimension - len(start)), 'constant')
+        if len(target) < dimension:
+            target = np.pad(target, (0, dimension - len(target)), 'constant')
+        
         t = np.linspace(0, duration, num_points)
-        trajectory = np.zeros((num_points, 3))
+        trajectory = np.zeros((num_points, dimension))
         
         for i, t_i in enumerate(t):
             s = t_i / duration
@@ -332,11 +382,13 @@ class ReferenceTrajectoryGenerator:
             time_stamps: 新时间戳
         """
         # 从当前位置（当前目标）到新目标生成轨迹
+        dimension = max(len(current_target), len(new_target))
         return self.generate_spiral_trajectory(
             start=current_target,
             target=new_target,
             duration=duration,
-            num_points=int(duration * 10)  # 10 Hz 采样
+            num_points=int(duration * 10),  # 10 Hz 采样
+            dimension=dimension
         )
     
     def generate_multiple_trajectories(
@@ -357,7 +409,8 @@ class ReferenceTrajectoryGenerator:
         # 过山车轨迹参数
         circle_radius: float = 0.3,
         circle_plane: str = 'vertical',
-        circle_ratio: float = 0.6
+        circle_ratio: float = 0.6,
+        dimension: int = 3
     ) -> List[Tuple[np.ndarray, np.ndarray]]:
         """
         生成多条参考轨迹
@@ -368,10 +421,10 @@ class ReferenceTrajectoryGenerator:
         
         Args:
             num_trajectories: 轨迹数量
-            start_mean: 起点均值 [3]
-            start_cov: 起点协方差矩阵 [3, 3] 或标量（各向同性）
-            end_mean: 终点均值 [3]
-            end_cov: 终点协方差矩阵 [3, 3] 或标量（各向同性）
+            start_mean: 起点均值 [dimension]
+            start_cov: 起点协方差矩阵 [dimension, dimension] 或标量（各向同性）
+            end_mean: 终点均值 [dimension]
+            end_cov: 终点协方差矩阵 [dimension, dimension] 或标量（各向同性）
             duration: 每条轨迹的持续时间
             num_points: 每条轨迹的点数
             trajectory_type: 轨迹类型 ('spiral' 或 'rollercoaster')
@@ -383,6 +436,7 @@ class ReferenceTrajectoryGenerator:
             circle_radius: 圆的半径（仅用于rollercoaster）
             circle_plane: 圆所在平面 ('vertical' 或 'horizontal')（仅用于rollercoaster）
             circle_ratio: 圆部分占整个轨迹的比例 [0, 1]（仅用于rollercoaster）
+            dimension: 状态空间维度（默认3）
             
         Returns:
             trajectories: 轨迹列表，每个元素是 (trajectory, time_stamps) 元组
@@ -390,16 +444,32 @@ class ReferenceTrajectoryGenerator:
         start_mean = np.array(start_mean).flatten()
         end_mean = np.array(end_mean).flatten()
         
+        # 确保维度匹配
+        if len(start_mean) < dimension:
+            start_mean = np.pad(start_mean, (0, dimension - len(start_mean)), 'constant')
+        if len(end_mean) < dimension:
+            end_mean = np.pad(end_mean, (0, dimension - len(end_mean)), 'constant')
+        
         # 处理协方差矩阵
         if np.isscalar(start_cov):
-            start_cov = np.eye(3) * start_cov
+            start_cov = np.eye(dimension) * start_cov
         else:
             start_cov = np.array(start_cov)
+            if start_cov.shape[0] < dimension:
+                # 扩展协方差矩阵
+                new_cov = np.eye(dimension) * (np.trace(start_cov) / start_cov.shape[0])
+                new_cov[:start_cov.shape[0], :start_cov.shape[1]] = start_cov
+                start_cov = new_cov
         
         if np.isscalar(end_cov):
-            end_cov = np.eye(3) * end_cov
+            end_cov = np.eye(dimension) * end_cov
         else:
             end_cov = np.array(end_cov)
+            if end_cov.shape[0] < dimension:
+                # 扩展协方差矩阵
+                new_cov = np.eye(dimension) * (np.trace(end_cov) / end_cov.shape[0])
+                new_cov[:end_cov.shape[0], :end_cov.shape[1]] = end_cov
+                end_cov = new_cov
         
         trajectories = []
         
@@ -413,7 +483,8 @@ class ReferenceTrajectoryGenerator:
                 num_points=num_points,
                 circle_radius=circle_radius,
                 circle_plane=circle_plane,
-                circle_ratio=circle_ratio
+                circle_ratio=circle_ratio,
+                dimension=dimension
             )
             
             for i in range(num_trajectories):
@@ -433,7 +504,8 @@ class ReferenceTrajectoryGenerator:
                     num_points=num_points,
                     circle_radius=circle_radius,
                     circle_plane=circle_plane,
-                    circle_ratio=circle_ratio
+                    circle_ratio=circle_ratio,
+                    dimension=dimension
                 )
                 
                 trajectories.append((trajectory, time_stamps))
@@ -447,7 +519,8 @@ class ReferenceTrajectoryGenerator:
                 duration=duration,
                 num_points=num_points,
                 spiral_radius=base_spiral_radius,
-                num_turns=base_num_turns
+                num_turns=base_num_turns,
+                dimension=dimension
             )
             
             # 找到收敛段的起始索引
@@ -473,7 +546,8 @@ class ReferenceTrajectoryGenerator:
                     duration=duration,
                     num_points=num_points,
                     spiral_radius=spiral_radius,
-                    num_turns=num_turns
+                    num_turns=num_turns,
+                    dimension=dimension
                 )
                 
                 # 创建混合轨迹：前半部分使用随机螺旋，后半部分收敛到统一路径

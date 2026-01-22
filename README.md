@@ -65,13 +65,18 @@ trajectory_tracking_mpc/
 
 **状态向量**：
 \[
-\mathbf{x} = [p_x, p_y, p_z, v_x, v_y, v_z]^T
+\mathbf{x} = [p_x, p_y, p_z, ..., p_n, v_x, v_y, v_z, ..., v_n]^T
 \]
+其中 \(n\) 是状态空间维度（默认3，可通过 `--dimension` 参数自定义）。
 
 **控制输入**：
 \[
-\mathbf{u} = [a_x, a_y, a_z]^T
+\mathbf{u} = [a_x, a_y, a_z, ..., a_n]^T
 \]
+
+**状态观测**：
+- **位置**：完全可观测（笛卡尔空间位置）
+- **速度**：默认通过位置差分估计（`--estimate-velocity`，默认启用），或假设完全可观测（`--perfect-velocity`）
 
 **离散时间动力学**（欧拉积分，\(dt = 0.1\) s）：
 \[
@@ -222,6 +227,8 @@ python main.py [OPTIONS]
 | `--trajectory-type` | `str` | `rollercoaster` | 轨迹类型：`spiral`（螺旋）或 `rollercoaster`（过山车） |
 | `--num-replanning` | `int` | `None` | 重规划事件次数（默认：MPC 为 20，prob_mpc 为 0） |
 | `--debug` | `flag` | `False` | 调试模式（仅用于 prob_mpc：将 GP 训练限制为 10 次迭代） |
+| `--dimension` | `int` | `3` | 状态空间维度（默认3，表示3D空间。前3维永远是x, y, z用于可视化） |
+| `--perfect-velocity` | `flag` | `False` | 假设速度完全可观测（默认：False。默认启用速度估计，设置此选项则禁用） |
 
 #### 使用示例
 
@@ -238,6 +245,21 @@ python main.py --method prob_mpc --trajectory-type rollercoaster --debug
 **标准 MPC，过山车轨迹**：
 ```bash
 python main.py --method mpc --trajectory-type rollercoaster
+```
+
+**标准 MPC，启用速度估计（默认行为）**：
+```bash
+python main.py --method mpc --trajectory-type spiral
+```
+
+**标准 MPC，假设速度完全可观测（理想情况）**：
+```bash
+python main.py --method mpc --trajectory-type spiral --perfect-velocity
+```
+
+**概率 MPC，5维空间，启用速度估计（默认）**：
+```bash
+python main.py --method prob_mpc --trajectory-type rollercoaster --dimension 5
 ```
 
 ### 编程接口
@@ -305,7 +327,25 @@ for k in range(n_steps):
 
 ## 关键特性
 
-### 1. 严格终端约束
+### 1. 速度估计（真实场景模拟）
+
+默认情况下，系统模拟真实场景，其中**只能观测到位置信息**，速度需要通过位置差分估计：
+
+- **默认行为**（`--estimate-velocity`，默认启用）：
+  - 只观测位置：`p_observed = [p_x, p_y, p_z, ...]`
+  - 速度估计：`v_estimated = (p[k] - p[k-1]) / dt`
+  - 组合状态：`x = [p_observed, v_estimated]`
+
+- **理想情况**（`--perfect-velocity`）：
+  - 假设所有状态（包括速度）完全可观测
+  - 速度直接从状态中获取（仿真环境）
+
+速度估计器支持多种方法：
+- `simple`：简单差分（默认）
+- `moving_average`：滑动平均
+- `lowpass`：低通滤波
+
+### 2. 严格终端约束
 
 两种方法在终端步都强制执行**数学等式约束**（而非软惩罚）：
 

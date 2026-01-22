@@ -20,6 +20,10 @@ def template_prob_simulator(model, gp_trajectory=None, trajectory_duration=1.0):
     Returns:
         simulator: 配置好的仿真器
     """
+    # 获取维度信息
+    dimension = getattr(model, 'dimension', 3)
+    dim_names = getattr(model, 'dim_names', ['x', 'y', 'z'])
+    
     simulator = do_mpc.simulator.Simulator(model)
     
     # 设置仿真参数
@@ -48,69 +52,66 @@ def template_prob_simulator(model, gp_trajectory=None, trajectory_duration=1.0):
             goal_mean = gp_trajectory.get_goal_mean()
             goal_variance = gp_trajectory.get_goal_variance()
             
+            # 确保维度匹配
+            if len(mean) < dimension:
+                mean = np.pad(mean, (0, dimension - len(mean)), 'constant')
+            if len(variance) < dimension:
+                variance = np.pad(variance, (0, dimension - len(variance)), 'constant', constant_values=1e-6)
+            if len(goal_mean) < dimension:
+                goal_mean = np.pad(goal_mean, (0, dimension - len(goal_mean)), 'constant')
+            if len(goal_variance) < dimension:
+                goal_variance = np.pad(goal_variance, (0, dimension - len(goal_variance)), 'constant', constant_values=1e-6)
+            
             # 填充参考位置（GP均值）
-            tvp_num['p_x_ref'] = float(mean[0])
-            tvp_num['p_y_ref'] = float(mean[1])
-            tvp_num['p_z_ref'] = float(mean[2])
+            for i, dim_name in enumerate(dim_names):
+                if i < len(mean):
+                    tvp_num[f'p_{dim_name}_ref'] = float(mean[i])
+                else:
+                    tvp_num[f'p_{dim_name}_ref'] = 0.0
             
             # 填充GP方差
-            tvp_num['sigma_x_sq'] = float(max(variance[0], 1e-6))
-            tvp_num['sigma_y_sq'] = float(max(variance[1], 1e-6))
-            tvp_num['sigma_z_sq'] = float(max(variance[2], 1e-6))
+            for i, dim_name in enumerate(dim_names):
+                if i < len(variance):
+                    tvp_num[f'sigma_{dim_name}_sq'] = float(max(variance[i], 1e-6))
+                else:
+                    tvp_num[f'sigma_{dim_name}_sq'] = 1e-6
             
             # 计算权重（与MPC中的公式一致）
-            trace_sigma = np.sum(variance)
+            trace_sigma = np.sum(variance[:dimension])
             threshold = 0.1  # 与template_prob_mpc.py中的阈值一致
             alpha = threshold / (threshold + trace_sigma)
             alpha = np.clip(alpha, 0.01, 1.0)
             tvp_num['alpha_weight'] = float(alpha)
             
             # 填充目标均值和方差
-            tvp_num['mu_goal_x'] = float(goal_mean[0])
-            tvp_num['mu_goal_y'] = float(goal_mean[1])
-            tvp_num['mu_goal_z'] = float(goal_mean[2])
-            tvp_num['sigma_goal_x_sq'] = float(max(goal_variance[0], 1e-6))
-            tvp_num['sigma_goal_y_sq'] = float(max(goal_variance[1], 1e-6))
-            tvp_num['sigma_goal_z_sq'] = float(max(goal_variance[2], 1e-6))
+            for i, dim_name in enumerate(dim_names):
+                if i < len(goal_mean):
+                    tvp_num[f'mu_goal_{dim_name}'] = float(goal_mean[i])
+                else:
+                    tvp_num[f'mu_goal_{dim_name}'] = 0.0
+                
+                if i < len(goal_variance):
+                    tvp_num[f'sigma_goal_{dim_name}_sq'] = float(max(goal_variance[i], 1e-6))
+                else:
+                    tvp_num[f'sigma_goal_{dim_name}_sq'] = 1e-6
             
             # 填充终端目标（使用GP目标均值）
-            tvp_num['p_x_ref_terminal'] = float(goal_mean[0])
-            tvp_num['p_y_ref_terminal'] = float(goal_mean[1])
-            tvp_num['p_z_ref_terminal'] = float(goal_mean[2])
+            for i, dim_name in enumerate(dim_names):
+                if i < len(goal_mean):
+                    tvp_num[f'p_{dim_name}_ref_terminal'] = float(goal_mean[i])
+                else:
+                    tvp_num[f'p_{dim_name}_ref_terminal'] = 0.0
             
-            # 计算参考速度（数值微分）
-            if t_normalized < 0.99:
-                t_next = float(min(1.0, t_normalized + 0.01))  # 小步长用于微分
-                mean_next = gp_trajectory.predict_mean(t_next)
-                dt_actual = 0.01 * trajectory_duration
-                v_ref = (mean_next - mean) / dt_actual
-            else:
-                v_ref = np.zeros(3)
-            
-            tvp_num['v_x_ref'] = float(v_ref[0])
-            tvp_num['v_y_ref'] = float(v_ref[1])
-            tvp_num['v_z_ref'] = float(v_ref[2])
+            # 注意：不再需要计算参考速度，因为系统是一阶的，没有速度状态
         else:
             # 默认值（如果未提供GP）
-            tvp_num['p_x_ref'] = 0.0
-            tvp_num['p_y_ref'] = 0.0
-            tvp_num['p_z_ref'] = 0.0
-            tvp_num['v_x_ref'] = 0.0
-            tvp_num['v_y_ref'] = 0.0
-            tvp_num['v_z_ref'] = 0.0
-            tvp_num['sigma_x_sq'] = 1e-6
-            tvp_num['sigma_y_sq'] = 1e-6
-            tvp_num['sigma_z_sq'] = 1e-6
+            for dim_name in dim_names:
+                tvp_num[f'p_{dim_name}_ref'] = 0.0
+                tvp_num[f'sigma_{dim_name}_sq'] = 1e-6
+                tvp_num[f'mu_goal_{dim_name}'] = 0.0
+                tvp_num[f'sigma_goal_{dim_name}_sq'] = 1e-6
+                tvp_num[f'p_{dim_name}_ref_terminal'] = 0.0
             tvp_num['alpha_weight'] = 1.0
-            tvp_num['mu_goal_x'] = 0.0
-            tvp_num['mu_goal_y'] = 0.0
-            tvp_num['mu_goal_z'] = 0.0
-            tvp_num['sigma_goal_x_sq'] = 1e-6
-            tvp_num['sigma_goal_y_sq'] = 1e-6
-            tvp_num['sigma_goal_z_sq'] = 1e-6
-            tvp_num['p_x_ref_terminal'] = 0.0
-            tvp_num['p_y_ref_terminal'] = 0.0
-            tvp_num['p_z_ref_terminal'] = 0.0
         
         return tvp_num
     

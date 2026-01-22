@@ -75,15 +75,18 @@ class GaussianProcessTrajectory:
 
     def __init__(self,
                  normalize_time: bool = True,
-                 device: Optional[torch.device] = None):
+                 device: Optional[torch.device] = None,
+                 dimension: int = 3):
         """
         初始化GP轨迹模型
         
         Args:
             normalize_time: 是否将时间归一化到[0,1]（推荐，GP更稳定）
             device: torch设备（None则自动检测CPU/GPU）
+            dimension: 状态空间维度（默认3）
         """
         self.normalize_time = normalize_time
+        self.dimension = dimension
 
         # 设备管理
         if device is None:
@@ -94,8 +97,14 @@ class GaussianProcessTrajectory:
 
         self.dtype = torch.float64  # 使用double精度提高数值稳定性
 
-        self.gp_models = {}  # 存储三个维度的GP模型
-        self.likelihoods = {}  # 存储三个维度的likelihood
+        # 维度名称列表：x, y, z, d, e, ...
+        dim_names = ['x', 'y', 'z'] + [chr(ord('a') + i) for i in range(max(0, dimension - 3))]
+        if dimension > 26:
+            dim_names = ['x', 'y', 'z'] + [f'd{i}' for i in range(3, dimension)]
+        self.dim_names = dim_names[:dimension]
+
+        self.gp_models = {}  # 存储所有维度的GP模型
+        self.likelihoods = {}  # 存储所有维度的likelihood
         self.is_fitted = False
         # 存储每个维度的数据变异性（用于方差校正）
         self.data_std = {}  # 每个维度的标准差
@@ -123,21 +132,36 @@ class GaussianProcessTrajectory:
         if len(trajectories) == 0:
             raise ValueError("至少需要一条轨迹用于训练")
 
+        # 从第一条轨迹确定维度
+        first_traj = np.array(trajectories[0][0])
+        traj_dimension = first_traj.shape[1]
+        
+        # 如果初始化时没有指定维度，使用轨迹的维度
+        if self.dimension != traj_dimension:
+            self.dimension = traj_dimension
+            # 更新维度名称列表
+            dim_names = ['x', 'y', 'z'] + [chr(ord('a') + i) for i in range(max(0, traj_dimension - 3))]
+            if traj_dimension > 26:
+                dim_names = ['x', 'y', 'z'] + [f'd{i}' for i in range(3, traj_dimension)]
+            self.dim_names = dim_names[:traj_dimension]
+
         # 收集所有轨迹数据
         all_times = []
-        all_positions = {'x': [], 'y': [], 'z': []}
+        all_positions = {dim_name: [] for dim_name in self.dim_names}
 
         for traj, time_stamps in trajectories:
             traj = np.array(traj)
             time_stamps = np.array(time_stamps)
 
-            if traj.shape[1] != 3:
-                raise ValueError(f"轨迹维度应为3，得到{traj.shape[1]}")
+            if traj.shape[1] != self.dimension:
+                raise ValueError(f"轨迹维度应为{self.dimension}，得到{traj.shape[1]}")
 
             all_times.append(time_stamps)
-            all_positions['x'].append(traj[:, 0])
-            all_positions['y'].append(traj[:, 1])
-            all_positions['z'].append(traj[:, 2])
+            for i, dim_name in enumerate(self.dim_names):
+                if i < traj.shape[1]:
+                    all_positions[dim_name].append(traj[:, i])
+                else:
+                    all_positions[dim_name].append(np.zeros(traj.shape[0]))
 
         # 归一化时间到[0,1]（如果启用）
         if self.normalize_time:
@@ -153,7 +177,7 @@ class GaussianProcessTrajectory:
             normalized_times = all_times
 
         # 对每个维度独立训练GP
-        for dim in ['x', 'y', 'z']:
+        for dim in self.dim_names:
             # 准备训练数据
             X_list = []
             Y_list = []
@@ -249,7 +273,7 @@ class GaussianProcessTrajectory:
                 - 如果normalize_time=False: 期望接收原始时间
             
         Returns:
-            mean: 均值位置 [3] (x, y, z)
+            mean: 均值位置 [dimension]
         """
         if not self.is_fitted:
             raise ValueError("GP模型尚未训练，请先调用fit()")
@@ -264,8 +288,8 @@ class GaussianProcessTrajectory:
             t_norm = t
 
         # 查询每个维度的GP
-        mean = np.zeros(3)
-        for i, dim in enumerate(['x', 'y', 'z']):
+        mean = np.zeros(self.dimension)
+        for i, dim in enumerate(self.dim_names):
             model = self.gp_models[dim]
             likelihood = self.likelihoods[dim]
 
@@ -296,7 +320,7 @@ class GaussianProcessTrajectory:
                 - 如果normalize_time=False: 期望接收原始时间
             
         Returns:
-            variance: 方差 [3] (σ²_x, σ²_y, σ²_z)
+            variance: 方差 [dimension]
         """
         if not self.is_fitted:
             raise ValueError("GP模型尚未训练，请先调用fit()")
@@ -311,8 +335,8 @@ class GaussianProcessTrajectory:
             t_norm = t
 
         # 查询每个维度的GP方差
-        variance = np.zeros(3)
-        for i, dim in enumerate(['x', 'y', 'z']):
+        variance = np.zeros(self.dimension)
+        for i, dim in enumerate(self.dim_names):
             model = self.gp_models[dim]
             likelihood = self.likelihoods[dim]
 
@@ -348,7 +372,7 @@ class GaussianProcessTrajectory:
             t: 时间（归一化或原始，取决于normalize_time设置）
             
         Returns:
-            covariance: 协方差矩阵 [3, 3]
+            covariance: 协方差矩阵 [dimension, dimension]
         """
         variance = self.predict_variance(t)
         return np.diag(variance)
@@ -362,8 +386,8 @@ class GaussianProcessTrajectory:
             t: 时间（归一化或原始，取决于normalize_time设置）
             
         Returns:
-            mean: 均值位置 [3]
-            variance: 方差 [3]
+            mean: 均值位置 [dimension]
+            variance: 方差 [dimension]
         """
         if not self.is_fitted:
             raise ValueError("GP模型尚未训练，请先调用fit()")
@@ -381,10 +405,10 @@ class GaussianProcessTrajectory:
         test_x = torch.tensor([[t_norm]], dtype=self.dtype, device=self.device)
 
         # 同时查询所有维度（更高效）
-        mean = np.zeros(3)
-        variance = np.zeros(3)
+        mean = np.zeros(self.dimension)
+        variance = np.zeros(self.dimension)
 
-        for i, dim in enumerate(['x', 'y', 'z']):
+        for i, dim in enumerate(self.dim_names):
             model = self.gp_models[dim]
             likelihood = self.likelihoods[dim]
 
@@ -414,7 +438,7 @@ class GaussianProcessTrajectory:
         获取目标位置均值（在归一化时间t=1.0）
         
         Returns:
-            goal_mean: 目标位置均值 [3]
+            goal_mean: 目标位置均值 [dimension]
         """
         # 归一化时间下，t=1.0对应终点
         return self.predict_mean(1.0)
@@ -424,7 +448,7 @@ class GaussianProcessTrajectory:
         获取目标位置方差（在归一化时间t=1.0）
         
         Returns:
-            goal_variance: 目标位置方差 [3]
+            goal_variance: 目标位置方差 [dimension]
         """
         # 归一化时间下，t=1.0对应终点
         return self.predict_variance(1.0)
@@ -439,8 +463,8 @@ class GaussianProcessTrajectory:
             times: 时间数组 [N]（归一化或原始，取决于normalize_time设置）
             
         Returns:
-            mean: 均值位置 [N, 3]
-            variance: 方差 [N, 3]
+            mean: 均值位置 [N, dimension]
+            variance: 方差 [N, dimension]
         """
         if not self.is_fitted:
             raise ValueError("GP模型尚未训练，请先调用fit()")
@@ -459,10 +483,10 @@ class GaussianProcessTrajectory:
         test_x = torch.tensor(times_norm[:, None], dtype=self.dtype, device=self.device)
         
         # 批量预测所有维度
-        mean = np.zeros((N, 3))
-        variance = np.zeros((N, 3))
+        mean = np.zeros((N, self.dimension))
+        variance = np.zeros((N, self.dimension))
         
-        for i, dim in enumerate(['x', 'y', 'z']):
+        for i, dim in enumerate(self.dim_names):
             model = self.gp_models[dim]
             likelihood = self.likelihoods[dim]
             

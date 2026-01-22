@@ -10,7 +10,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
-def run_mpc(num_replanning: int = 20, trajectory_type: str = 'spiral'):
+def run_mpc(num_replanning: int = 20, trajectory_type: str = 'spiral', dimension: int = 3, estimate_velocity: bool = True):
     """运行标准MPC方法"""
     # 导入原标准MPC实现
     import importlib.util
@@ -27,12 +27,16 @@ def run_mpc(num_replanning: int = 20, trajectory_type: str = 'spiral'):
 
     # 调用main函数
     main_mpc_module.main(num_replanning=num_replanning,
-                         trajectory_type=trajectory_type)
+                         trajectory_type=trajectory_type,
+                         dimension=dimension,
+                         estimate_velocity=estimate_velocity)
 
 
 def run_prob_mpc(num_replanning: int = 0,
                  debug: bool = False,
-                 trajectory_type: str = 'rollercoaster'):
+                 trajectory_type: str = 'rollercoaster',
+                 dimension: int = 3,
+                 estimate_velocity: bool = True):
     """运行概率MPC方法"""
     # 导入原概率MPC实现
     import importlib.util
@@ -51,7 +55,9 @@ def run_prob_mpc(num_replanning: int = 0,
     # 调用main函数
     main_prob_mpc_module.main(num_replanning=num_replanning,
                               debug=debug,
-                              trajectory_type=trajectory_type)
+                              trajectory_type=trajectory_type,
+                              dimension=dimension,
+                              estimate_velocity=estimate_velocity)
 
 
 def main():
@@ -92,24 +98,49 @@ def main():
                         action='store_true',
                         help='Debug模式（仅用于概率MPC：GP训练仅进行10次迭代）')
 
-    args = parser.parse_args()
+    parser.add_argument('--dimension',
+                        type=int,
+                        default=3,
+                        help='状态空间维度（默认: 3，表示3D空间。前3维永远是x, y, z用于可视化）')
 
+    parser.add_argument('--perfect-velocity',
+                        action='store_true',
+                        default=False,
+                        help='假设速度完全可观测（默认: False。如果设置，则禁用速度估计）')
+
+    args = parser.parse_args()
+    
+    # 处理速度估计选项：默认启用，除非指定--perfect-velocity
+    estimate_velocity = not args.perfect_velocity
+
+    # 验证维度参数
+    if args.dimension < 3:
+        parser.error("维度必须至少为3（前3维用于笛卡尔空间可视化）")
+    
     # 根据方法选择运行
     if args.method == 'mpc':
         num_replanning = args.num_replanning if args.num_replanning is not None else 20
         print("=" * 60)
         print("运行标准MPC方法")
+        print(f"状态空间维度: {args.dimension}")
+        print(f"控制模式: 一阶系统（状态=位置，控制输入=期望速度，p_dot=u）")
         print("=" * 60)
         run_mpc(num_replanning=num_replanning,
-                trajectory_type=args.trajectory_type)
+                trajectory_type=args.trajectory_type,
+                dimension=args.dimension,
+                estimate_velocity=estimate_velocity)
     elif args.method == 'prob_mpc':
         num_replanning = args.num_replanning if args.num_replanning is not None else 0
         print("=" * 60)
         print("运行概率MPC方法")
+        print(f"状态空间维度: {args.dimension}")
+        print(f"控制模式: 一阶系统（状态=位置，控制输入=期望速度，p_dot=u）")
         print("=" * 60)
         run_prob_mpc(num_replanning=num_replanning,
                      debug=args.debug,
-                     trajectory_type=args.trajectory_type)
+                     trajectory_type=args.trajectory_type,
+                     dimension=args.dimension,
+                     estimate_velocity=estimate_velocity)
     else:
         parser.error(f"未知的方法: {args.method}")
 

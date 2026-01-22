@@ -21,22 +21,28 @@ from mpc.template_simulator import template_simulator
 from reference_trajectory import ReferenceTrajectoryGenerator
 
 
-def main(num_replanning: int = 20, trajectory_type: str = 'spiral'):
+def main(num_replanning: int = 20, trajectory_type: str = 'spiral', dimension: int = 3, estimate_velocity: bool = True):
     """
-    主函数：轨迹跟踪 MPC 仿真
+    主函数：轨迹跟踪 MPC 仿真（仅位置控制）
     
     Args:
         num_replanning: 重新规划次数（默认20次）
         trajectory_type: 轨迹类型 ('spiral' 或 'rollercoaster')
+        dimension: 状态空间维度（默认3，表示3D空间）
+        estimate_velocity: 已废弃（保留以兼容接口，但不再使用）
+    
+    注意：系统现在只观测和控制位置，速度和加速度都不可观测或控制
     """
     print("=" * 60)
-    print("轨迹跟踪 MPC 仿真")
+    print("轨迹跟踪 MPC 仿真（一阶系统）")
     print("=" * 60)
     print(f"重新规划次数: {num_replanning}")
+    print(f"状态空间维度: {dimension}")
+    print(f"控制模式: 一阶系统（状态=位置，控制输入=期望速度，p_dot=u）")
 
     # ========== 1. 创建系统模型 ==========
     print("\n[1/6] 创建系统模型...")
-    model = template_model('SX')
+    model = template_model('SX', dimension=dimension)
     print(f"   状态维度: {model.n_x}")
     print(f"   输入维度: {model.n_u}")
 
@@ -48,10 +54,12 @@ def main(num_replanning: int = 20, trajectory_type: str = 'spiral'):
     np.random.seed(42)
 
     # 定义起点和终点的多维高斯分布
-    start_mean = np.array([0.0, 0.0, 0.0])
+    start_mean = np.zeros(dimension)
+    start_mean[:3] = [0.0, 0.0, 0.0]  # 前3维用于3D空间
     start_std = 0.05  # 标准差 0.05m
     start_cov = start_std**2  # 协方差 = 标准差^2 = 0.0025
-    end_mean = np.array([1.0, 1.0, 1.0])
+    end_mean = np.zeros(dimension)
+    end_mean[:3] = [1.0, 1.0, 1.0]  # 前3维用于3D空间
     end_std = 0.05  # 标准差 0.05m
     end_cov = end_std**2  # 协方差 = 标准差^2 = 0.0025
 
@@ -78,7 +86,8 @@ def main(num_replanning: int = 20, trajectory_type: str = 'spiral'):
             trajectory_type='rollercoaster',
             circle_radius=0.3,
             circle_plane='vertical',
-            circle_ratio=0.6
+            circle_ratio=0.6,
+            dimension=dimension
         )
     else:  # 'spiral'
         print(f"   轨迹类型: 螺旋轨迹")
@@ -95,7 +104,8 @@ def main(num_replanning: int = 20, trajectory_type: str = 'spiral'):
             base_num_turns=2.0,
             noise_scale=0.3,
             convergence_start=0.8,  # 在80%时间后开始收敛
-            convergence_length=0.2  # 最后20%的时间用于收敛
+            convergence_length=0.2,  # 最后20%的时间用于收敛
+            dimension=dimension
         )
 
     # 选择第一条轨迹用于 MPC 跟踪（可以随机选择或选择特定的）
@@ -123,16 +133,24 @@ def main(num_replanning: int = 20, trajectory_type: str = 'spiral'):
 
     # ========== 5. 初始化状态 ==========
     print("\n[5/6] 初始化状态...")
-    # 初始状态：从选定轨迹的起点开始，零速度
+    # 初始状态：使用起点分布的均值（与轨迹生成一致）
+    # 注意：虽然轨迹起点是从分布中采样的，但为了确保初始状态在数据集起点附近，
+    # 我们使用起点分布的均值作为初始状态
+    # 构建初始状态向量：只有位置
+    x0_list = []
+    for i in range(dimension):
+        if i < len(start_mean):
+            x0_list.append(start_mean[i])  # 使用起点分布的均值
+        else:
+            x0_list.append(0.0)
+    x0 = np.array(x0_list).reshape(-1, 1)
+    
+    # 验证初始状态与轨迹起点的距离
     start_point = trajectory[0]
-    x0 = np.array([
-        start_point[0],  # p_x
-        start_point[1],  # p_y
-        start_point[2],  # p_z
-        0.0,  # v_x
-        0.0,  # v_y
-        0.0  # v_z
-    ]).reshape(-1, 1)
+    start_dist = np.linalg.norm(x0.flatten()[:min(dimension, len(start_point))] - start_point[:min(dimension, len(start_point))])
+    print(f"   初始状态: {x0.flatten()}")
+    print(f"   轨迹起点: {start_point}")
+    print(f"   初始状态与轨迹起点距离: {start_dist:.4f}m")
 
     # 设置初始状态
     mpc.x0 = x0
@@ -159,6 +177,15 @@ def main(num_replanning: int = 20, trajectory_type: str = 'spiral'):
     # 当前状态
     x_current = x0.copy()
     current_time = 0.0
+    
+    # 初始化前一个控制输入（用于计算控制输入变化率）
+    u_prev = np.zeros((dimension, 1))  # 初始控制输入为0
+    
+    # 先记录初始状态（用于可视化起点）
+    actual_trajectory.append(x0.flatten())
+    reference_trajectory_actual.append(trajectory[0])
+    control_inputs.append(np.zeros(dimension))
+    time_history.append(0.0)
 
     # 计算重新规划的时间点（均匀分布在仿真过程中）
     # 避免在第一步和最后几步更新，确保有足够的仿真时间到达终点
@@ -205,7 +232,7 @@ def main(num_replanning: int = 20, trajectory_type: str = 'spiral'):
             # 参考轨迹的终点是从 end_mean 和 end_cov 的高斯分布中采样的
             # 为了保持一致性，新目标也应该从相同的分布中采样
             new_target = np.random.multivariate_normal(end_mean,
-                                                       np.eye(3) * end_cov)
+                                                       np.eye(dimension) * end_cov)
 
             print(
                 f"     从终点分布采样新目标 (均值={end_mean}, 标准差={np.sqrt(end_cov):.3f}m)"
@@ -214,7 +241,8 @@ def main(num_replanning: int = 20, trajectory_type: str = 'spiral'):
 
             # 从 all_trajectories 中选择一条轨迹，提取其螺旋参数
             # 然后从当前位置到新目标重新生成轨迹，使用相似的螺旋参数
-            current_position = x_current[:3].flatten()
+            # 提取所有维度的位置（现在状态就是位置）
+            current_position = x_current.flatten()
 
             # 方法：选择终点最接近新目标的轨迹（用于提取螺旋参数）
             best_end_dist = float('inf')
@@ -264,7 +292,8 @@ def main(num_replanning: int = 20, trajectory_type: str = 'spiral'):
                 duration=new_trajectory_duration,  # 使用剩余时间
                 num_points=new_num_points,  # 根据剩余时间调整点数
                 spiral_radius=spiral_radius,
-                num_turns=num_turns)
+                num_turns=num_turns,
+                dimension=dimension)
 
             # 关键修复：时间戳从当前时间开始，确保连续性
             # 新轨迹的终点时间应该是 current_time + new_trajectory_duration = sim_time
@@ -292,6 +321,34 @@ def main(num_replanning: int = 20, trajectory_type: str = 'spiral'):
             # 更新仿真器的 TVP 数据（通过字典引用自动更新）
             simulator_tvp_data['trajectory'] = trajectory
             simulator_tvp_data['time_stamps'] = time_stamps
+            
+            # 关键修复：重新规划时，根据新轨迹的初始方向重置前一个控制输入
+            # 这样可以避免控制输入变化率惩罚导致的不匹配和锐利转折
+            # 计算新轨迹初始方向的速度（用于设置前一个控制输入）
+            if len(trajectory) > 1 and len(time_stamps) > 1:
+                # 计算从当前位置到轨迹下一个点的时间差
+                dt_traj = time_stamps[1] - time_stamps[0]
+                if dt_traj > 1e-6:
+                    # 计算从当前位置到轨迹下一个点的方向速度
+                    next_point = trajectory[1]
+                    direction = next_point - current_position
+                    # 计算方向速度（位置差 / 时间差）
+                    u_prev = (direction / dt_traj).reshape(-1, 1)
+                    # 限制速度大小，避免过大
+                    max_u_prev = 3.0  # 最大速度限制
+                    u_prev_norm = np.linalg.norm(u_prev)
+                    if u_prev_norm > max_u_prev:
+                        u_prev = u_prev / u_prev_norm * max_u_prev
+                else:
+                    u_prev = np.zeros((dimension, 1))
+            else:
+                u_prev = np.zeros((dimension, 1))
+            
+            print(f"     重新规划时重置前一个控制输入: {u_prev.flatten()}")
+            
+            # 重新规划时，更新MPC的初始猜测，帮助优化器更快收敛
+            # 使用新轨迹的前几个点作为初始猜测
+            mpc.set_initial_guess()
 
         # ========== 更新 MPC 参考轨迹 ==========
         # 关键步骤：在每个控制周期更新预测时域内的参考轨迹
@@ -304,20 +361,34 @@ def main(num_replanning: int = 20, trajectory_type: str = 'spiral'):
                                         trajectory, time_stamps,
                                         terminal_index=terminal_index)
         
+        # ========== 设置前一个控制输入参数 ==========
+        # 用于计算控制输入变化率，提高平滑性
+        # 更新MPC和仿真器内部的参数数据字典（参数函数会从中读取）
+        for i, dim_name in enumerate(mpc.model.dim_names):
+            if i < dimension:
+                mpc._p_data[f'u_{dim_name}_prev'] = float(u_prev[i, 0])
+                # 同时更新仿真器的参数（如果存在）
+                if hasattr(simulator, '_p_data'):
+                    simulator._p_data[f'u_{dim_name}_prev'] = float(u_prev[i, 0])
+        
         # ========== MPC 求解 ==========
         # MPC 基于当前状态和参考轨迹计算最优控制输入
         u0 = mpc.make_step(x_current)
+        
+        # 更新前一个控制输入（用于下一步）
+        u_prev = u0.copy()
 
         # ========== 仿真器步进 ==========
         # 应用控制输入，仿真系统响应
         y_next = simulator.make_step(u0)
 
         # ========== 状态更新 ==========
-        # 更新当前状态（假设状态完全可观测）
+        # 真实场景：只能观测到位置，状态就是位置
+        # 从仿真器获取状态（现在只有位置）
         x_current = y_next
         
         # ========== 数据记录 ==========
-        actual_trajectory.append(x_current[:3].flatten())  # 位置
+        actual_trajectory.append(x_current.flatten())  # 位置（所有维度，现在状态就是位置）
 
         # 获取参考点（确保在轨迹范围内）
         # 如果超出轨迹范围，使用轨迹的最后一个点（目标终点）
@@ -342,7 +413,7 @@ def main(num_replanning: int = 20, trajectory_type: str = 'spiral'):
 
         # 进度显示
         if (k + 1) % 20 == 0:
-            pos_error = np.linalg.norm(x_current[:3].flatten() - ref_point)
+            pos_error = np.linalg.norm(x_current.flatten() - ref_point[:dimension])
             print(f"   步骤 {k+1}/{n_steps}: 时间={current_time:.2f}s, "
                   f"位置误差={pos_error:.3f}m")
 
@@ -367,11 +438,7 @@ def main(num_replanning: int = 20, trajectory_type: str = 'spiral'):
         pred_p_x = float(np.array(mpc.data.prediction(('_x', 'p_x'), t_ind=-1)).reshape(-1)[-1])
         pred_p_y = float(np.array(mpc.data.prediction(('_x', 'p_y'), t_ind=-1)).reshape(-1)[-1])
         pred_p_z = float(np.array(mpc.data.prediction(('_x', 'p_z'), t_ind=-1)).reshape(-1)[-1])
-        pred_v_x = float(np.array(mpc.data.prediction(('_x', 'v_x'), t_ind=-1)).reshape(-1)[-1])
-        pred_v_y = float(np.array(mpc.data.prediction(('_x', 'v_y'), t_ind=-1)).reshape(-1)[-1])
-        pred_v_z = float(np.array(mpc.data.prediction(('_x', 'v_z'), t_ind=-1)).reshape(-1)[-1])
         print(f"   MPC 预测终点: [{pred_p_x:.6f} {pred_p_y:.6f} {pred_p_z:.6f}]")
-        print(f"   MPC 预测终点速度: [{pred_v_x:.6f} {pred_v_y:.6f} {pred_v_z:.6f}]")
     except Exception as exc:
         print(f"   MPC 预测终点获取失败: {exc}")
 
@@ -384,7 +451,8 @@ def main(num_replanning: int = 20, trajectory_type: str = 'spiral'):
                       np.array(time_history),
                       trajectory,
                       all_trajectories,
-                      reference_target_end=reference_target_end)
+                      reference_target_end=reference_target_end,
+                      dimension=dimension)
 
     print("\n" + "=" * 60)
     print("轨迹跟踪 MPC 仿真完成！")
@@ -398,22 +466,38 @@ def visualize_results(actual_traj: np.ndarray,
                       full_ref_traj: np.ndarray,
                       all_trajectories: List[Tuple[np.ndarray,
                                                    np.ndarray]] = None,
-                      reference_target_end: np.ndarray = None):
+                      reference_target_end: np.ndarray = None,
+                      dimension: int = 3):
     """
     可视化仿真结果
     
     Args:
-        actual_traj: 实际执行轨迹 [N, 3]
-        ref_traj_actual: 实际跟踪的参考轨迹 [N, 3]
-        control_inputs: 控制输入历史 [N, 3]
+        actual_traj: 实际执行轨迹 [N, dimension]
+        ref_traj_actual: 实际跟踪的参考轨迹 [N, dimension]
+        control_inputs: 控制输入历史 [N, dimension]
         time_history: 时间历史 [N]
-        full_ref_traj: 完整参考轨迹 [M, 3]（用于跟踪的轨迹）
+        full_ref_traj: 完整参考轨迹 [M, dimension]（用于跟踪的轨迹）
         all_trajectories: 所有生成的参考轨迹列表
+        reference_target_end: 参考目标终点 [dimension]
+        dimension: 状态空间维度（默认3）
     """
-    fig = plt.figure(figsize=(16, 10))
+    # 计算需要的子图数量
+    # 基础图：3D轨迹图、X-Y投影、位置误差、控制输入（前3维）
+    # 额外维度图：每个额外维度一个图
+    num_extra_dims = max(0, dimension - 3)
+    
+    # 基础布局：2x2，如果有额外维度，增加行数
+    if num_extra_dims > 0:
+        n_rows = 2 + (num_extra_dims + 1) // 2  # 每行2个图
+        n_cols = 2
+        fig = plt.figure(figsize=(16, 5 * n_rows))
+    else:
+        n_rows = 2
+        n_cols = 2
+        fig = plt.figure(figsize=(16, 10))
 
-    # ========== 3D Trajectory Plot ==========
-    ax1 = fig.add_subplot(2, 2, 1, projection='3d')
+    # ========== 3D Trajectory Plot (只显示前3维 x, y, z) ==========
+    ax1 = fig.add_subplot(n_rows, n_cols, 1, projection='3d')
 
     # Plot all reference trajectories
     if all_trajectories is not None:
@@ -559,8 +643,8 @@ def visualize_results(actual_traj: np.ndarray,
     ax1.legend()
     ax1.grid(True)
 
-    # ========== X-Y Plane Projection ==========
-    ax2 = fig.add_subplot(2, 2, 2)
+    # ========== X-Y Plane Projection (只显示前2维 x, y) ==========
+    ax2 = fig.add_subplot(n_rows, n_cols, 2)
 
     # Plot all reference trajectories in X-Y plane
     if all_trajectories is not None:
@@ -641,36 +725,69 @@ def visualize_results(actual_traj: np.ndarray,
     ax2.axis('equal')
 
     # ========== Position Tracking Error ==========
-    ax3 = fig.add_subplot(2, 2, 3)
+    ax3 = fig.add_subplot(n_rows, n_cols, 3)
     position_error = np.linalg.norm(actual_traj - ref_traj_actual, axis=1)
     ax3.plot(time_history, position_error, 'r-', linewidth=2)
     ax3.set_xlabel('Time (s)')
     ax3.set_ylabel('Position Error (m)')
-    ax3.set_title('Position Tracking Error')
+    ax3.set_title('Position Tracking Error (All Dimensions)')
     ax3.grid(True)
 
-    # ========== Control Input ==========
-    ax4 = fig.add_subplot(2, 2, 4)
-    ax4.plot(time_history,
-             control_inputs[:, 0],
-             'r-',
-             label='a_x',
-             linewidth=2)
-    ax4.plot(time_history,
-             control_inputs[:, 1],
-             'g-',
-             label='a_y',
-             linewidth=2)
-    ax4.plot(time_history,
-             control_inputs[:, 2],
-             'b-',
-             label='a_z',
-             linewidth=2)
+    # ========== Control Input (前3维) ==========
+    ax4 = fig.add_subplot(n_rows, n_cols, 4)
+    # 只显示前3维的控制输入（期望速度）
+    dim_names = ['x', 'y', 'z'] + [chr(ord('a') + i) for i in range(max(0, dimension - 3))]
+    if dimension > 26:
+        dim_names = ['x', 'y', 'z'] + [f'd{i}' for i in range(3, dimension)]
+    
+    colors = ['r', 'g', 'b', 'm', 'c', 'y', 'orange', 'purple', 'brown', 'pink']
+    for i in range(min(3, dimension)):
+        if i < control_inputs.shape[1]:
+            ax4.plot(time_history,
+                     control_inputs[:, i],
+                     colors[i % len(colors)] + '-',
+                     label=f'u_{dim_names[i]}',
+                     linewidth=2)
     ax4.set_xlabel('Time (s)')
-    ax4.set_ylabel('Acceleration (m/s²)')
-    ax4.set_title('Control Input (Acceleration)')
+    ax4.set_ylabel('Desired Velocity (m/s)')
+    ax4.set_title('Control Input (First 3 Dimensions)')
     ax4.legend()
     ax4.grid(True)
+    
+    # ========== 额外维度的可视化 ==========
+    if num_extra_dims > 0:
+        plot_idx = 5  # 从第5个位置开始
+        for dim_idx in range(3, dimension):
+            row = (plot_idx - 1) // n_cols + 1
+            col = (plot_idx - 1) % n_cols + 1
+            ax = fig.add_subplot(n_rows, n_cols, plot_idx)
+            
+            # 绘制该维度的轨迹
+            if dim_idx < actual_traj.shape[1]:
+                ax.plot(time_history, actual_traj[:, dim_idx], 
+                       'r-', linewidth=2, label=f'Actual (dim {dim_idx})')
+            if dim_idx < ref_traj_actual.shape[1]:
+                ax.plot(time_history, ref_traj_actual[:, dim_idx], 
+                       'b--', linewidth=1.5, alpha=0.7, label=f'Reference (dim {dim_idx})')
+            
+            # 绘制该维度的控制输入（期望速度）
+            if dim_idx < control_inputs.shape[1]:
+                ax2_twin = ax.twinx()
+                ax2_twin.plot(time_history, control_inputs[:, dim_idx], 
+                             'g-', linewidth=1.5, alpha=0.6, label=f'Control (dim {dim_idx})')
+                ax2_twin.set_ylabel('Desired Velocity (m/s)', color='g')
+                ax2_twin.tick_params(axis='y', labelcolor='g')
+            
+            ax.set_xlabel('Time (s)')
+            ax.set_ylabel(f'Position (dim {dim_idx})', color='b')
+            ax.set_title(f'Dimension {dim_idx} ({dim_names[dim_idx] if dim_idx < len(dim_names) else f"d{dim_idx}"})')
+            ax.tick_params(axis='y', labelcolor='b')
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc='upper left')
+            if dim_idx < control_inputs.shape[1]:
+                ax2_twin.legend(loc='upper right')
+            
+            plot_idx += 1
 
     plt.tight_layout()
     plt.savefig('trajectory_tracking_result.png', dpi=150, bbox_inches='tight')
