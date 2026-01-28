@@ -34,7 +34,7 @@ class SparseGPRegressionModel(ExactGP):
             base_kernel = RBFKernel()
             # 设置合理的初始lengthscale（归一化时间[0,1]的合理范围）
             # lengthscale=0.3意味着在时间距离0.3内相关性较高
-            base_kernel.lengthscale = 0.3
+            base_kernel.lengthscale = 0.9
         elif kernel_type == 'Matern':
             base_kernel = MaternKernel(nu=2.5)  # Matern52
             base_kernel.lengthscale = 0.3
@@ -98,9 +98,12 @@ class GaussianProcessTrajectory:
         self.dtype = torch.float64  # 使用double精度提高数值稳定性
 
         # 维度名称列表：x, y, z, d, e, ...
-        dim_names = ['x', 'y', 'z'] + [chr(ord('a') + i) for i in range(max(0, dimension - 3))]
+        dim_names = ['x', 'y', 'z'] + [
+            chr(ord('a') + i) for i in range(max(0, dimension - 3))
+        ]
         if dimension > 26:
-            dim_names = ['x', 'y', 'z'] + [f'd{i}' for i in range(3, dimension)]
+            dim_names = ['x', 'y', 'z'
+                         ] + [f'd{i}' for i in range(3, dimension)]
         self.dim_names = dim_names[:dimension]
 
         self.gp_models = {}  # 存储所有维度的GP模型
@@ -135,14 +138,17 @@ class GaussianProcessTrajectory:
         # 从第一条轨迹确定维度
         first_traj = np.array(trajectories[0][0])
         traj_dimension = first_traj.shape[1]
-        
+
         # 如果初始化时没有指定维度，使用轨迹的维度
         if self.dimension != traj_dimension:
             self.dimension = traj_dimension
             # 更新维度名称列表
-            dim_names = ['x', 'y', 'z'] + [chr(ord('a') + i) for i in range(max(0, traj_dimension - 3))]
+            dim_names = ['x', 'y', 'z'] + [
+                chr(ord('a') + i) for i in range(max(0, traj_dimension - 3))
+            ]
             if traj_dimension > 26:
-                dim_names = ['x', 'y', 'z'] + [f'd{i}' for i in range(3, traj_dimension)]
+                dim_names = ['x', 'y', 'z'
+                             ] + [f'd{i}' for i in range(3, traj_dimension)]
             self.dim_names = dim_names[:traj_dimension]
 
         # 收集所有轨迹数据
@@ -202,12 +208,12 @@ class GaussianProcessTrajectory:
             else:
                 num_inducing = min(num_inducing, len(X))
                 num_inducing = max(10, num_inducing)  # 至少10个
-            
+
             # 计算数据的实际变异性（标准差）
             # 这反映了轨迹间的真实差异，用于方差校正
             Y_std = float(np.std(Y))
             self.data_std[dim] = Y_std
-            
+
             # 根据数据变异性设置初始outputscale
             # 确保outputscale在合理范围内（不能太小）
             initial_outputscale = max(0.01, min(1.0, Y_std))
@@ -224,7 +230,7 @@ class GaussianProcessTrajectory:
                                             num_inducing=num_inducing,
                                             kernel_type=kernel_type)
             model = model.to(device=self.device, dtype=self.dtype)
-            
+
             # 设置初始outputscale（基于数据变异性）
             model.base_covar_module.outputscale = initial_outputscale
 
@@ -236,7 +242,10 @@ class GaussianProcessTrajectory:
                 # 使用Adam优化器（同时优化模型和likelihood参数）
                 # 收集所有参数，使用id去重（因为InducingPointKernel可能已经包含likelihood参数）
                 model_param_ids = {id(p) for p in model.parameters()}
-                likelihood_params = [p for p in likelihood.parameters() if id(p) not in model_param_ids]
+                likelihood_params = [
+                    p for p in likelihood.parameters()
+                    if id(p) not in model_param_ids
+                ]
                 all_params = list(model.parameters()) + likelihood_params
                 optimizer = torch.optim.Adam(all_params, lr=0.01)
 
@@ -354,10 +363,10 @@ class GaussianProcessTrajectory:
 
             # 转换为numpy
             var_pred_np = float(var_pred.cpu().numpy()[0])
-            
+
             # 方差校正：Sparse GP会低估方差，特别是对于轨迹间的变异性
             # 添加一个基于数据实际变异性的最小方差项
-            data_var_min = (self.data_std[dim] * 0.3) ** 2  # 使用30%的数据标准差作为最小方差
+            data_var_min = (self.data_std[dim] * 0.3)**2  # 使用30%的数据标准差作为最小方差
             variance[i] = max(var_pred_np, data_var_min)
 
         return variance
@@ -423,11 +432,11 @@ class GaussianProcessTrajectory:
             # 转换为numpy
             mean[i] = float(mean_pred.cpu().numpy()[0])
             var_pred_np = float(var_pred.cpu().numpy()[0])
-            
+
             # 方差校正：Sparse GP会低估方差，特别是对于轨迹间的变异性
             # 添加一个基于数据实际变异性的最小方差项
             # 使用数据标准差的平方作为最小方差（但不要完全覆盖GP的预测）
-            data_var_min = (self.data_std[dim] * 0.3) ** 2  # 使用30%的数据标准差作为最小方差
+            data_var_min = (self.data_std[dim] * 0.3)**2  # 使用30%的数据标准差作为最小方差
             var_pred_np = max(var_pred_np, data_var_min)
             variance[i] = var_pred_np
 
@@ -452,8 +461,9 @@ class GaussianProcessTrajectory:
         """
         # 归一化时间下，t=1.0对应终点
         return self.predict_variance(1.0)
-    
-    def predict_mean_and_variance_batch(self, times: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+
+    def predict_mean_and_variance_batch(
+            self, times: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         批量预测多个时间点的均值和方差（高效版本）
         
@@ -468,42 +478,45 @@ class GaussianProcessTrajectory:
         """
         if not self.is_fitted:
             raise ValueError("GP模型尚未训练，请先调用fit()")
-        
+
         # 确保times是1D数组
         times = np.asarray(times).flatten()
         N = len(times)
-        
+
         # 如果使用归一化时间，确保在[0,1]范围内
         if self.normalize_time:
             times_norm = np.clip(times, 0.0, 1.0)
         else:
             times_norm = times
-        
+
         # 转换为torch.Tensor [N, 1]
-        test_x = torch.tensor(times_norm[:, None], dtype=self.dtype, device=self.device)
-        
+        test_x = torch.tensor(times_norm[:, None],
+                              dtype=self.dtype,
+                              device=self.device)
+
         # 批量预测所有维度
         mean = np.zeros((N, self.dimension))
         variance = np.zeros((N, self.dimension))
-        
+
         for i, dim in enumerate(self.dim_names):
             model = self.gp_models[dim]
             likelihood = self.likelihoods[dim]
-            
+
             # 批量预测（禁用梯度计算，启用SGPR方差校正）
-            with torch.no_grad(), gpytorch.settings.sgpr_diagonal_correction(True):
+            with torch.no_grad(), gpytorch.settings.sgpr_diagonal_correction(
+                    True):
                 pred = model(test_x)
                 pred_likelihood = likelihood(pred)
                 mean_pred = pred_likelihood.mean  # [N]
                 var_pred = pred_likelihood.variance  # [N]
-            
+
             # 转换为numpy
             mean[:, i] = mean_pred.cpu().numpy()
             var_pred_np = var_pred.cpu().numpy()
-            
+
             # 方差校正：Sparse GP会低估方差，特别是对于轨迹间的变异性
             # 添加一个基于数据实际变异性的最小方差项
-            data_var_min = (self.data_std[dim] * 0.3) ** 2  # 使用30%的数据标准差作为最小方差
+            data_var_min = (self.data_std[dim] * 0.3)**2  # 使用30%的数据标准差作为最小方差
             variance[:, i] = np.maximum(var_pred_np, data_var_min)
-        
+
         return mean, variance

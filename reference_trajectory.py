@@ -2,9 +2,11 @@
 参考轨迹生成器
 生成时间参数化的连续参考轨迹（如螺旋轨迹）
 用于 MPC 轨迹跟踪控制
+支持从H5文件加载真实轨迹
 """
 import numpy as np
 from typing import Tuple, Optional, List
+from scipy.interpolate import interp1d
 
 
 class ReferenceTrajectoryGenerator:
@@ -15,16 +17,46 @@ class ReferenceTrajectoryGenerator:
     - 螺旋轨迹
     - 直线轨迹（用于对比）
     - 自定义曲线
+    - 从H5文件加载的真实轨迹
     """
     
-    def __init__(self, trajectory_type: str = 'spiral'):
+    def __init__(self, trajectory_type: str = 'spiral', 
+                 real_trajectory: Optional[Tuple[np.ndarray, np.ndarray]] = None):
         """
         初始化轨迹生成器
         
         Args:
-            trajectory_type: 轨迹类型 ('spiral', 'straight', 'custom')
+            trajectory_type: 轨迹类型 ('spiral', 'straight', 'custom', 'real')
+            real_trajectory: 真实轨迹数据 (trajectory, time_stamps)，如果提供则使用真实轨迹
         """
         self.trajectory_type = trajectory_type
+        self.real_trajectory = real_trajectory
+        self.real_trajectory_data = None
+        self.real_time_stamps = None
+        self.real_interpolator = None
+        
+        # 如果提供了真实轨迹，设置插值器
+        if real_trajectory is not None:
+            self.real_trajectory_data, self.real_time_stamps = real_trajectory
+            # 创建插值器（线性插值）
+            if len(self.real_trajectory_data) > 1:
+                # 确保时间戳是单调递增的
+                if len(self.real_time_stamps) > 1 and np.any(np.diff(self.real_time_stamps) <= 0):
+                    # 如果时间戳有问题，使用索引作为时间
+                    self.real_time_stamps = np.arange(len(self.real_trajectory_data)) * 0.1
+                
+                # 为每个维度创建插值器
+                dimension = self.real_trajectory_data.shape[1]
+                self.real_interpolators = []
+                for dim in range(dimension):
+                    interp = interp1d(self.real_time_stamps, 
+                                     self.real_trajectory_data[:, dim],
+                                     kind='linear',
+                                     bounds_error=False,
+                                     fill_value='extrapolate')
+                    self.real_interpolators.append(interp)
+            else:
+                self.real_interpolators = None
     
     def generate_spiral_trajectory(
         self,
@@ -330,9 +362,9 @@ class ReferenceTrajectoryGenerator:
     
     def get_reference_at_time(
         self,
-        trajectory: np.ndarray,
-        time_stamps: np.ndarray,
-        t: float
+        trajectory: Optional[np.ndarray] = None,
+        time_stamps: Optional[np.ndarray] = None,
+        t: float = 0.0
     ) -> np.ndarray:
         """
         在指定时间获取参考轨迹点（插值）

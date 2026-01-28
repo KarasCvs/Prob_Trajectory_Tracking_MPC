@@ -21,7 +21,7 @@ from mpc.template_simulator import template_simulator
 from reference_trajectory import ReferenceTrajectoryGenerator
 
 
-def main(num_replanning: int = 20, trajectory_type: str = 'spiral', dimension: int = 3, estimate_velocity: bool = True):
+def main(num_replanning: int = 20, trajectory_type: str = 'spiral', dimension: int = 3, estimate_velocity: bool = True, use_real_trajectory: bool = False, dataset_path: str = None):
     """
     主函数：轨迹跟踪 MPC 仿真（仅位置控制）
     
@@ -30,6 +30,8 @@ def main(num_replanning: int = 20, trajectory_type: str = 'spiral', dimension: i
         trajectory_type: 轨迹类型 ('spiral' 或 'rollercoaster')
         dimension: 状态空间维度（默认3，表示3D空间）
         estimate_velocity: 已废弃（保留以兼容接口，但不再使用）
+        use_real_trajectory: 是否使用真实轨迹（从H5数据集加载）
+        dataset_path: 数据集路径（当使用真实轨迹时必需）
     
     注意：系统现在只观测和控制位置，速度和加速度都不可观测或控制
     """
@@ -46,74 +48,141 @@ def main(num_replanning: int = 20, trajectory_type: str = 'spiral', dimension: i
     print(f"   状态维度: {model.n_x}")
     print(f"   输入维度: {model.n_u}")
 
-    # ========== 2. 创建参考轨迹生成器 ==========
-    print("\n[2/6] 创建参考轨迹生成器...")
-    traj_gen = ReferenceTrajectoryGenerator(trajectory_type=trajectory_type)
-
-    # 设置随机种子以确保可重复性
-    np.random.seed(42)
-
-    # 定义起点和终点的多维高斯分布
-    start_mean = np.zeros(dimension)
-    start_mean[:3] = [0.0, 0.0, 0.0]  # 前3维用于3D空间
-    start_std = 0.05  # 标准差 0.05m
-    start_cov = start_std**2  # 协方差 = 标准差^2 = 0.0025
-    end_mean = np.zeros(dimension)
-    end_mean[:3] = [1.0, 1.0, 1.0]  # 前3维用于3D空间
-    end_std = 0.05  # 标准差 0.05m
-    end_cov = end_std**2  # 协方差 = 标准差^2 = 0.0025
-
-    # 生成多条参考轨迹（20条）
-    num_trajectories = 20
-    trajectory_duration = 10.0  # 秒
-    num_points_per_traj = 200  # 增加点数确保连续性
-
-    print(f"   生成 {num_trajectories} 条参考轨迹...")
-    print(f"   起点分布: 均值={start_mean}, 标准差={start_std}m, 协方差={start_cov}")
-    print(f"   终点分布: 均值={end_mean}, 标准差={end_std}m, 协方差={end_cov}")
-
-    # 根据轨迹类型生成轨迹
-    if trajectory_type == 'rollercoaster':
-        print(f"   轨迹类型: 过山车轨迹（平稳曲线，方差小）")
-        all_trajectories = traj_gen.generate_multiple_trajectories(
-            num_trajectories=num_trajectories,
-            start_mean=start_mean,
-            start_cov=start_cov,
-            end_mean=end_mean,
-            end_cov=end_cov,
-            duration=trajectory_duration,
-            num_points=num_points_per_traj,
-            trajectory_type='rollercoaster',
-            circle_radius=0.3,
-            circle_plane='vertical',
-            circle_ratio=0.6,
-            dimension=dimension
-        )
-    else:  # 'spiral'
-        print(f"   轨迹类型: 螺旋轨迹")
-        all_trajectories = traj_gen.generate_multiple_trajectories(
-            num_trajectories=num_trajectories,
-            start_mean=start_mean,
-            start_cov=start_cov,
-            end_mean=end_mean,
-            end_cov=end_cov,
-            duration=trajectory_duration,
-            num_points=num_points_per_traj,
-            trajectory_type='spiral',
-            base_spiral_radius=0.2,
-            base_num_turns=2.0,
-            noise_scale=0.3,
-            convergence_start=0.8,  # 在80%时间后开始收敛
-            convergence_length=0.2,  # 最后20%的时间用于收敛
-            dimension=dimension
-        )
-
-    # 选择第一条轨迹用于 MPC 跟踪（可以随机选择或选择特定的）
-    selected_idx = 0
-    trajectory, time_stamps = all_trajectories[selected_idx]
-    print(f"   选择轨迹 {selected_idx+1}/{num_trajectories} 用于 MPC 跟踪")
-    print(f"   参考轨迹长度: {len(trajectory)} 点")
-    print(f"   轨迹持续时间: {trajectory_duration} 秒")
+    # ========== 2. 生成或加载参考轨迹 ==========
+    print("\n[2/6] 生成或加载参考轨迹...")
+    
+    if use_real_trajectory:
+        # 使用真实轨迹
+        if dataset_path is None:
+            raise ValueError("使用真实轨迹时必须提供 dataset_path 参数")
+        
+        # 尝试导入 h5_trajectory_loader
+        try:
+            from h5_trajectory_loader import H5TrajectoryLoader
+            HAS_H5PY = True
+        except ImportError:
+            HAS_H5PY = False
+            raise ImportError(
+                "使用真实轨迹需要安装 h5py 模块。请运行: pip install h5py 或 conda install h5py"
+            )
+        
+        print(f"   从数据集加载真实轨迹: {dataset_path}")
+        print(f"   指定维度: {dimension}")
+        loader = H5TrajectoryLoader(dataset_path, max_trajectories=1, dimension=dimension)
+        all_trajectories = loader.load_all_trajectories()
+        
+        if len(all_trajectories) == 0:
+            raise ValueError(f"未能从数据集加载任何轨迹: {dataset_path}")
+        
+        # 选择第一条轨迹
+        selected_traj, selected_ts = all_trajectories[0]
+        
+        if len(selected_traj) == 0:
+            raise ValueError("加载的轨迹为空")
+        
+        # 检查真实轨迹的维度
+        real_dimension = selected_traj.shape[1]
+        if dimension != real_dimension:
+            print(f"   警告: 真实轨迹维度 ({real_dimension}) 与指定维度 ({dimension}) 不匹配")
+            print(f"   将使用加载后的轨迹维度: {real_dimension}")
+            dimension = real_dimension
+            # 需要重新创建模型
+            print("\n[1/6] 重新创建系统模型（使用正确的维度）...")
+            model = template_model('SX', dimension=dimension)
+            print(f"   状态维度: {model.n_x}")
+            print(f"   输入维度: {model.n_u}")
+        
+        # 使用真实轨迹
+        trajectory = selected_traj
+        time_stamps = selected_ts
+        trajectory_duration = time_stamps[-1] - time_stamps[0] if len(time_stamps) > 1 else len(trajectory) * 0.1
+        
+        print(f"   参考轨迹长度: {len(trajectory)} 点")
+        print(f"   轨迹持续时间: {trajectory_duration:.2f} 秒")
+        
+        # 从真实轨迹获取起点和终点
+        start_mean = trajectory[0].copy()
+        end_mean = trajectory[-1].copy()
+        
+        # 为了兼容后续代码，定义一些默认值（虽然真实轨迹不需要这些）
+        start_std = 0.05
+        start_cov = start_std**2
+        end_std = 0.05
+        end_cov = end_std**2
+        num_trajectories = 1  # 真实轨迹只有1条
+        num_points_per_traj = len(trajectory)  # 使用真实轨迹的点数
+        
+        # 创建轨迹生成器，传入真实轨迹
+        traj_gen = ReferenceTrajectoryGenerator(trajectory_type=trajectory_type, real_trajectory=(trajectory, time_stamps))
+        all_trajectories = [(trajectory, time_stamps)]  # 为了兼容后续代码
+    else:
+        # 使用生成的轨迹
+        traj_gen = ReferenceTrajectoryGenerator(trajectory_type=trajectory_type)
+        
+        # 设置随机种子以确保可重复性
+        np.random.seed(42)
+        
+        # 定义起点和终点的多维高斯分布
+        start_mean = np.zeros(dimension)
+        start_mean[:3] = [0.0, 0.0, 0.0]  # 前3维用于3D空间
+        start_std = 0.05  # 标准差 0.05m
+        start_cov = start_std**2  # 协方差 = 标准差^2 = 0.0025
+        end_mean = np.zeros(dimension)
+        end_mean[:3] = [1.0, 1.0, 1.0]  # 前3维用于3D空间
+        end_std = 0.05  # 标准差 0.05m
+        end_cov = end_std**2  # 协方差 = 标准差^2 = 0.0025
+        
+        # 生成多条参考轨迹（20条）
+        num_trajectories = 20
+        trajectory_duration = 10.0  # 秒
+        num_points_per_traj = 200  # 增加点数确保连续性
+        
+        print(f"   生成 {num_trajectories} 条参考轨迹...")
+        print(f"   起点分布: 均值={start_mean}, 标准差={start_std}m, 协方差={start_cov}")
+        print(f"   终点分布: 均值={end_mean}, 标准差={end_std}m, 协方差={end_cov}")
+        
+        # 根据轨迹类型生成轨迹
+        if trajectory_type == 'rollercoaster':
+            print(f"   轨迹类型: 过山车轨迹（平稳曲线，方差小）")
+            all_trajectories = traj_gen.generate_multiple_trajectories(
+                num_trajectories=num_trajectories,
+                start_mean=start_mean,
+                start_cov=start_cov,
+                end_mean=end_mean,
+                end_cov=end_cov,
+                duration=trajectory_duration,
+                num_points=num_points_per_traj,
+                trajectory_type='rollercoaster',
+                circle_radius=0.3,
+                circle_plane='vertical',
+                circle_ratio=0.6,
+                dimension=dimension
+            )
+        else:  # 'spiral'
+            print(f"   轨迹类型: 螺旋轨迹")
+            all_trajectories = traj_gen.generate_multiple_trajectories(
+                num_trajectories=num_trajectories,
+                start_mean=start_mean,
+                start_cov=start_cov,
+                end_mean=end_mean,
+                end_cov=end_cov,
+                duration=trajectory_duration,
+                num_points=num_points_per_traj,
+                trajectory_type='spiral',
+                base_spiral_radius=0.2,
+                base_num_turns=2.0,
+                noise_scale=0.3,
+                convergence_start=0.8,  # 在80%时间后开始收敛
+                convergence_length=0.2,  # 最后20%的时间用于收敛
+                dimension=dimension
+            )
+        
+        # 选择第一条轨迹用于 MPC 跟踪（可以随机选择或选择特定的）
+        selected_idx = 0
+        trajectory, time_stamps = all_trajectories[selected_idx]
+        print(f"   选择轨迹 {selected_idx+1}/{num_trajectories} 用于 MPC 跟踪")
+        print(f"   参考轨迹长度: {len(trajectory)} 点")
+        print(f"   轨迹持续时间: {trajectory_duration} 秒")
 
     # ========== 3. 创建 MPC 控制器 ==========
     print("\n[3/6] 创建 MPC 控制器...")

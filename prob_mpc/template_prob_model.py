@@ -70,9 +70,12 @@ def template_prob_model(symvar_type='SX', dimension=3):
     for i, dim_name in enumerate(dim_names):
         model.set_variable('_tvp', f'sigma_goal_{dim_name}_sq')
     
-    # 终端目标（用于终端等式约束）
+    # 终端目标（用于终端软约束惩罚）
     for i, dim_name in enumerate(dim_names):
         model.set_variable('_tvp', f'p_{dim_name}_ref_terminal')
+    
+    # 终端惩罚权重（0表示不激活，>0表示激活）
+    model.set_variable('_tvp', 'terminal_weight')
     
     # ========== 动力学方程（Euler 离散） ==========
     dt = 0.1

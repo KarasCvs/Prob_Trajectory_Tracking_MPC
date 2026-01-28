@@ -99,14 +99,18 @@ def template_mpc(model,
     mpc.set_p_fun(p_fun)
 
     # === Terminal equality constraint（硬约束） ===
-    def _active(expr, ref):
-        return expr * (ref < 1e19)
-
+    # 关键修复：使用更可靠的方法来激活/禁用约束
+    # 在非终端步，将 ref_terminal 设置为当前参考位置，使约束自动满足
+    # 在终端步，将 ref_terminal 设置为目标位置，使约束生效
+    # 这里直接使用约束表达式，通过 TVP 更新来控制约束是否生效
+    
     # 位置终端约束（只约束位置，不约束速度）
     for dim_name in dim_names:
-        terminal_expr = _active(
-            model.x[f'p_{dim_name}'] - model.tvp[f'p_{dim_name}_ref_terminal'],
-            model.tvp[f'p_{dim_name}_ref_terminal'])
+        # 直接使用位置误差作为约束表达式
+        # 在 TVP 更新时，非终端步的 ref_terminal 会被设置为当前参考位置
+        # 终端步的 ref_terminal 会被设置为目标位置
+        terminal_expr = model.x[f'p_{dim_name}'] - model.tvp[f'p_{dim_name}_ref_terminal']
+        
         mpc.set_nl_cons(f'terminal_p_{dim_name}_pos',
                         terminal_expr,
                         ub=0.0,
@@ -161,8 +165,10 @@ def update_mpc_reference_trajectory(mpc,
                 # 如果轨迹维度不足，使用0
                 tvp_template['_tvp', k, f'p_{dim_name}_ref'] = 0.0
 
-        # 终端等式约束只在对齐"仿真终点"的那一步生效：其余步填哨兵值（不生效）
+        # 终端等式约束：在终端步设置为目标位置，在非终端步设置为当前参考位置
+        # 这样在非终端步，约束自动满足（x - ref = 0），在终端步约束生效（x - target = 0）
         if terminal_index is not None and k == terminal_index:
+            # 终端步：设置为目标位置，使约束生效
             for i, dim_name in enumerate(dim_names):
                 if i < len(trajectory[-1]):
                     tvp_template[
@@ -171,7 +177,11 @@ def update_mpc_reference_trajectory(mpc,
                 else:
                     tvp_template['_tvp', k, f'p_{dim_name}_ref_terminal'] = 0.0
         else:
-            for dim_name in dim_names:
-                tvp_template['_tvp', k, f'p_{dim_name}_ref_terminal'] = 1e20
+            # 非终端步：设置为当前参考位置，使约束自动满足（误差为0）
+            for i, dim_name in enumerate(dim_names):
+                if i < len(ref_point):
+                    tvp_template['_tvp', k, f'p_{dim_name}_ref_terminal'] = ref_point[i]
+                else:
+                    tvp_template['_tvp', k, f'p_{dim_name}_ref_terminal'] = 0.0
 
     # TVP 函数已在初始化时设置，这里只更新模板内容

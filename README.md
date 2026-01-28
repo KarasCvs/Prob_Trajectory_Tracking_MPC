@@ -19,9 +19,12 @@
 1. **标准 MPC**：使用欧几里得距离的确定性参考轨迹跟踪
 2. **概率 MPC**：使用高斯过程（GP）回归和马氏距离的概率性轨迹跟踪
 
-两种方法都强制执行严格的终端等式约束，以保证目标位置处的误差为零。
-
 **核心思想**：轨迹不是被"学出来的"，而是通过 MPC "实时优化并跟踪"的。
+
+**重要说明**：
+- 系统采用**一阶模型**（只观测和控制位置），控制输入为期望速度（增量步进方式）
+- 标准 MPC 在终端步强制执行等式约束以保证目标位置处的误差为零
+- 概率 MPC 已移除终端约束（避免轨迹变直线问题），仅通过轨迹跟踪项实现跟踪
 
 ## 项目结构
 
@@ -61,30 +64,30 @@ trajectory_tracking_mpc/
 
 ### 系统模型
 
-两种方法使用相同的双积分器动力学：
+两种方法使用相同的**一阶系统模型**（增量步进控制）：
 
-**状态向量**：
+**状态向量**（只包含位置）：
 \[
-\mathbf{x} = [p_x, p_y, p_z, ..., p_n, v_x, v_y, v_z, ..., v_n]^T
+\mathbf{x} = [p_x, p_y, p_z, ..., p_n]^T
 \]
 其中 \(n\) 是状态空间维度（默认3，可通过 `--dimension` 参数自定义）。
 
-**控制输入**：
+**控制输入**（期望速度，增量步进方式）：
 \[
-\mathbf{u} = [a_x, a_y, a_z, ..., a_n]^T
+\mathbf{u} = [u_x, u_y, u_z, ..., u_n]^T
 \]
+其中 \(\mathbf{u}\) 表示期望速度，系统通过控制期望速度来实现位置控制。
 
 **状态观测**：
 - **位置**：完全可观测（笛卡尔空间位置）
-- **速度**：默认通过位置差分估计（`--estimate-velocity`，默认启用），或假设完全可观测（`--perfect-velocity`）
+- **速度**：系统不观测或控制速度状态，速度通过控制输入（期望速度）间接控制
 
 **离散时间动力学**（欧拉积分，\(dt = 0.1\) s）：
 \[
-\begin{aligned}
-\mathbf{p}_{k+1} &= \mathbf{p}_k + \mathbf{v}_k \cdot dt \\
-\mathbf{v}_{k+1} &= \mathbf{v}_k + \mathbf{u}_k \cdot dt
-\end{aligned}
+\mathbf{p}_{k+1} = \mathbf{p}_k + \mathbf{u}_k \cdot dt
 \]
+
+**注意**：这是一阶系统（\(\dot{\mathbf{p}} = \mathbf{u}\)），控制输入 \(\mathbf{u}\) 直接作为期望速度，系统通过增量步进的方式实现位置控制。这种设计避免了二阶系统可能产生的旋转问题，在势场中天然是梯度下降。
 
 ### 方法一：标准 MPC
 
@@ -93,13 +96,15 @@ trajectory_tracking_mpc/
 预测步 \(k\) 的阶段代价为：
 
 \[
-\ell_k = Q_{\text{pos}} \|\mathbf{p}_k - \mathbf{p}_{\text{ref},k}\|^2 + Q_{\text{vel}} \|\mathbf{v}_k - \mathbf{v}_{\text{ref},k}\|^2 + \mathbf{u}_k^T R \mathbf{u}_k
+\ell_k = Q_{\text{pos}} \|\mathbf{p}_k - \mathbf{p}_{\text{ref},k}\|^2 + Q_{\Delta u} \|\Delta \mathbf{u}_k\|^2 + \mathbf{u}_k^T R \mathbf{u}_k
 \]
 
 其中：
-- \(\mathbf{p}_{\text{ref},k}, \mathbf{v}_{\text{ref},k}\)：第 \(k\) 步的参考位置和速度（通过 TVP 提供）
-- \(Q_{\text{pos}} = 10.0\)，\(Q_{\text{vel}} = 1.0\)：跟踪权重
-- \(R = 0.1 \cdot \mathbf{I}_3\)：输入惩罚矩阵
+- \(\mathbf{p}_{\text{ref},k}\)：第 \(k\) 步的参考位置（通过 TVP 提供）
+- \(\Delta \mathbf{u}_k = \mathbf{u}_k - \mathbf{u}_{k-1}\)：控制输入变化率（用于平滑性）
+- \(Q_{\text{pos}} = 10.0\)：位置跟踪权重
+- \(Q_{\Delta u} = 0.5\)：控制输入变化率惩罚权重（提高平滑性，减少抖动）
+- \(R = 0.1 \cdot \mathbf{I}_n\)：控制输入惩罚矩阵（期望速度的平滑性惩罚）
 
 **总代价**：
 \[
@@ -108,18 +113,19 @@ J = \sum_{k=0}^{N-1} \ell_k
 
 终端代价 \(m_N = 0\)（弱终端代价，使用严格约束代替）。
 
+**注意**：由于系统是一阶的（只有位置状态），代价函数中不包含速度跟踪项。
+
 #### 终端约束
 
-在预测步 \(N-1\) 处强制执行等式约束（确保 \(x_N\) 到达目标）：
+在预测步 \(N-1\) 处强制执行等式约束（确保到达目标位置）：
 
 \[
-\begin{aligned}
-\mathbf{p}_{N-1} &= \mathbf{p}_{\text{target}} \\
-\mathbf{v}_{N-1} &= \mathbf{0}
-\end{aligned}
+\mathbf{p}_{N-1} = \mathbf{p}_{\text{target}}
 \]
 
 使用 `mpc.set_nl_cons()` 实现，设置 `lb = ub = 0.0` 和 `soft_constraint = False`。
+
+**注意**：由于系统是一阶的（没有速度状态），终端约束只约束位置，不约束速度。
 
 #### MPC 参数
 
@@ -145,43 +151,33 @@ J = \sum_{k=0}^{N-1} \ell_k
 
 #### 代价函数
 
-阶段代价使用马氏距离结合轨迹跟踪和目标吸引：
+阶段代价使用马氏距离进行轨迹跟踪：
 
 **轨迹项**（到 GP 均值的马氏距离）：
 \[
 \ell_{\text{traj},k} = (\mathbf{p}_k - \boldsymbol{\mu}_k)^T \boldsymbol{\Sigma}_k^{-1} (\mathbf{p}_k - \boldsymbol{\mu}_k)
 \]
 
-**目标项**（到目标的马氏距离）：
+其中 \(\boldsymbol{\Sigma}_k^{-1} = \text{diag}(1/\sigma_x^2, 1/\sigma_y^2, 1/\sigma_z^2, ...)\) 是对角协方差矩阵的逆。
+
+**阶段代价**：
 \[
-\ell_{\text{goal},k} = (\mathbf{p}_k - \boldsymbol{\mu}_T)^T \boldsymbol{\Sigma}_T^{-1} (\mathbf{p}_k - \boldsymbol{\mu}_T)
+\ell_k = \ell_{\text{traj},k} + \mathbf{u}_k^T R \mathbf{u}_k
 \]
 
-**加权组合**：
-\[
-\ell_k = \alpha_k \cdot \ell_{\text{traj},k} + (1 - \alpha_k) \cdot \ell_{\text{goal},k} + Q_{\text{vel}} \|\mathbf{v}_k - \mathbf{v}_{\text{ref},k}\|^2 + \mathbf{u}_k^T R \mathbf{u}_k
-\]
+其中 \(R = 0.5 \cdot \mathbf{I}_n\) 是控制输入惩罚矩阵（期望速度的平滑性惩罚）。
 
-**自适应权重**（基于 GP 不确定性）：
-\[
-\alpha_k = \frac{\tau}{\tau + \text{tr}(\boldsymbol{\Sigma}_k)}
-\]
-
-其中 \(\tau = 0.1\) 是阈值参数。这确保了：
-- **低不确定性**（\(\text{tr}(\boldsymbol{\Sigma}_k) \ll \tau\)）：\(\alpha_k \approx 1\) → 强轨迹跟踪
-- **高不确定性**（\(\text{tr}(\boldsymbol{\Sigma}_k) \gg \tau\)）：\(\alpha_k \approx 0\) → 强目标吸引
+**注意**：
+- 由于系统是一阶的（只有位置状态），代价函数中不包含速度跟踪项
+- 已移除目标项和终端约束，仅通过轨迹跟踪项实现跟踪（避免终端约束导致的轨迹变直线问题）
 
 #### 终端约束
 
-与标准 MPC 相同：在 \(N-1\) 处强制执行等式约束：
-\[
-\begin{aligned}
-\mathbf{p}_{N-1} &= \boldsymbol{\mu}_T \\
-\mathbf{v}_{N-1} &= \mathbf{0}
-\end{aligned}
-\]
+**当前实现**：概率 MPC 已**移除终端约束**，仅通过轨迹跟踪项实现跟踪。
 
-其中 \(\boldsymbol{\mu}_T\) 是训练数据中的实际终点均值（不是 GP 在 \(t=1.0\) 处的预测），以确保对齐。
+**原因**：如果增加终点位置作为约束（硬约束或软约束），即使权重非常小，轨迹也会变成直线，这是代码实现的问题，等待修复。
+
+**替代方案**：当前通过调整控制输入惩罚权重（\(R = 0.5\)）和轨迹跟踪项来间接影响终点行为。
 
 ## 安装
 
@@ -228,7 +224,7 @@ python main.py [OPTIONS]
 | `--num-replanning` | `int` | `None` | 重规划事件次数（默认：MPC 为 20，prob_mpc 为 0） |
 | `--debug` | `flag` | `False` | 调试模式（仅用于 prob_mpc：将 GP 训练限制为 10 次迭代） |
 | `--dimension` | `int` | `3` | 状态空间维度（默认3，表示3D空间。前3维永远是x, y, z用于可视化） |
-| `--perfect-velocity` | `flag` | `False` | 假设速度完全可观测（默认：False。默认启用速度估计，设置此选项则禁用） |
+| `--perfect-velocity` | `flag` | `False` | 假设速度完全可观测（默认：False。注意：当前系统是一阶的，不观测速度，此选项保留用于兼容性） |
 
 #### 使用示例
 
@@ -247,19 +243,19 @@ python main.py --method prob_mpc --trajectory-type rollercoaster --debug
 python main.py --method mpc --trajectory-type rollercoaster
 ```
 
-**标准 MPC，启用速度估计（默认行为）**：
+**标准 MPC，螺旋轨迹（默认行为）**：
 ```bash
 python main.py --method mpc --trajectory-type spiral
 ```
 
-**标准 MPC，假设速度完全可观测（理想情况）**：
-```bash
-python main.py --method mpc --trajectory-type spiral --perfect-velocity
-```
-
-**概率 MPC，5维空间，启用速度估计（默认）**：
+**概率 MPC，5维空间**：
 ```bash
 python main.py --method prob_mpc --trajectory-type rollercoaster --dimension 5
+```
+
+**概率 MPC，自定义 alpha_threshold**：
+```bash
+python main.py --method prob_mpc --trajectory-type rollercoaster --alpha-threshold 0.01
 ```
 
 ### 编程接口
@@ -273,12 +269,15 @@ from mpc.template_simulator import template_simulator
 from reference_trajectory import ReferenceTrajectoryGenerator
 
 # 创建模型、MPC、仿真器
-model = template_model('SX')
+# 注意：model 是一阶系统，状态只有位置，控制输入是期望速度
+model = template_model('SX', dimension=3)
 traj_gen = ReferenceTrajectoryGenerator(trajectory_type='spiral')
 mpc = template_mpc(model, traj_gen)
 simulator = template_simulator(model)
 
 # 仿真循环
+# x_current 只包含位置：[p_x, p_y, p_z, ...]
+# u0 是期望速度控制输入：[u_x, u_y, u_z, ...]
 for k in range(n_steps):
     update_mpc_reference_trajectory(mpc, traj_gen, current_time, trajectory, time_stamps)
     u0 = mpc.make_step(x_current)
@@ -300,14 +299,19 @@ gp_traj = GaussianProcessTrajectory(normalize_time=True)
 gp_traj.fit(normalized_trajectories, optimize=True, max_iters=200, num_inducing=100)
 
 # 创建模型、MPC、仿真器
-model = template_prob_model('SX')
+# 注意：model 是一阶系统，状态只有位置，控制输入是期望速度
+model = template_prob_model('SX', dimension=3)
 mpc = template_prob_mpc(model, gp_trajectory=gp_traj)
 simulator = template_prob_simulator(model, gp_trajectory=gp_traj, trajectory_duration=10.0)
 
 # 仿真循环
+# x_current 只包含位置：[p_x, p_y, p_z, ...]
+# u0 是期望速度控制输入：[u_x, u_y, u_z, ...]
+# 注意：概率 MPC 已移除终端约束，仅通过轨迹跟踪项实现跟踪
 for k in range(n_steps):
     t_normalized = current_time / trajectory_duration
-    update_mpc_gp_trajectory(mpc, gp_traj, t_normalized, terminal_index, trajectory_duration, actual_end_mean)
+    update_mpc_gp_trajectory(mpc, gp_traj, t_normalized, terminal_index=None, 
+                             trajectory_duration=trajectory_duration, actual_end_mean=None)
     u0 = mpc.make_step(x_current)
     y_next = simulator.make_step(u0)
     x_current = y_next
@@ -317,45 +321,47 @@ for k in range(n_steps):
 
 | 特性 | 标准 MPC | 概率 MPC |
 |------|---------|---------|
+| **系统模型** | 一阶系统（位置状态，期望速度控制） | 一阶系统（位置状态，期望速度控制） |
 | **参考轨迹** | 确定性轨迹 | GP 学习的轨迹分布 |
 | **代价度量** | 欧几里得距离 | 马氏距离 |
+| **代价函数** | 位置跟踪 + 控制输入变化率惩罚 + 控制输入惩罚 | 轨迹跟踪（马氏距离）+ 控制输入惩罚 |
 | **不确定性** | 未建模 | 通过 GP 方差显式建模 |
-| **自适应权重** | 固定权重 | 基于不确定性的动态 \(\alpha(t)\) |
+| **自适应权重** | 固定权重 | 已移除（当前仅使用轨迹跟踪项） |
+| **终端约束** | 等式约束（位置） | 已移除（避免轨迹变直线问题） |
 | **轨迹学习** | 手动生成 | 从多个示例中学习 |
 | **计算成本** | 低 | 较高（GP 预测 + 优化） |
 | **使用场景** | 已知参考轨迹 | 不确定/学习的轨迹模式 |
 
 ## 关键特性
 
-### 1. 速度估计（真实场景模拟）
+### 1. 一阶系统模型（增量步进控制）
 
-默认情况下，系统模拟真实场景，其中**只能观测到位置信息**，速度需要通过位置差分估计：
+系统采用**一阶模型**，只观测和控制位置：
 
-- **默认行为**（`--estimate-velocity`，默认启用）：
-  - 只观测位置：`p_observed = [p_x, p_y, p_z, ...]`
-  - 速度估计：`v_estimated = (p[k] - p[k-1]) / dt`
-  - 组合状态：`x = [p_observed, v_estimated]`
+- **状态**：只有位置 `x = [p_x, p_y, p_z, ..., p_n]`
+- **控制输入**：期望速度 `u = [u_x, u_y, u_z, ..., u_n]`（增量步进方式）
+- **动力学**：`p_{k+1} = p_k + u_k * dt`
 
-- **理想情况**（`--perfect-velocity`）：
-  - 假设所有状态（包括速度）完全可观测
-  - 速度直接从状态中获取（仿真环境）
+这种设计的优势：
+- 避免二阶系统可能产生的旋转问题
+- 在势场中天然是梯度下降（无curl）
+- 更符合实际应用中只能观测位置的场景
 
-速度估计器支持多种方法：
-- `simple`：简单差分（默认）
-- `moving_average`：滑动平均
-- `lowpass`：低通滤波
+**注意**：系统不观测或控制速度状态，速度通过控制输入（期望速度）间接控制。
 
-### 2. 严格终端约束
+### 2. 终端约束
 
-两种方法在终端步都强制执行**数学等式约束**（而非软惩罚）：
+**标准 MPC**：在终端步强制执行**数学等式约束**（而非软惩罚）：
 
 \[
-\mathbf{p}(T) = \mathbf{p}_{\text{target}}, \quad \mathbf{v}(T) = \mathbf{0}
+\mathbf{p}(T) = \mathbf{p}_{\text{target}}
 \]
 
 这保证了即使在多次重规划事件后，目标位置处的误差也为零。
 
-### 2. 参考轨迹类型
+**概率 MPC**：当前实现已移除终端约束，仅通过轨迹跟踪项实现跟踪。原因：如果增加终点位置作为约束，即使权重非常小，轨迹也会变成直线（代码问题，等待修复）。
+
+### 3. 参考轨迹类型
 
 #### 螺旋轨迹
 
@@ -369,14 +375,14 @@ for k in range(n_steps):
 - **参数**：`circle_radius`、`circle_plane`、`circle_ratio`
 - **特性**：方差更小，曲线更平滑
 
-### 3. 实时重规划
+### 4. 实时重规划
 
 标准 MPC 支持仿真过程中的动态目标更新：
 - 目标终点从与参考轨迹相同的分布中采样
 - 从当前位置到新目标重新生成轨迹
 - MPC 平滑适应目标变化
 
-### 4. 性能优化
+### 5. 性能优化
 
 概率 MPC 包括：
 - **批量 GP 预测**：一次调用预测所有时域点
@@ -390,11 +396,11 @@ for k in range(n_steps):
 1. **3D 轨迹图**：完整参考轨迹、实际执行轨迹、起点/终点
 2. **X-Y 平面投影**：轨迹跟踪的 2D 视图
 3. **位置跟踪误差**：误差随时间的变化
-4. **控制输入历史**：加速度命令随时间的变化
+4. **控制输入历史**：期望速度命令随时间的变化
 
 **概率 MPC 额外显示**：
 5. **GP 方差（不确定性）**：不确定性随时间的演化
-6. **轨迹权重 \(\alpha(t)\)**：轨迹项和目标项之间的动态权重
+6. **轨迹权重 \(\alpha(t)\)**：基于不确定性的动态权重（当前实现中主要用于记录，代价函数仅使用轨迹跟踪项）
 
 ## 理论背景
 
@@ -413,17 +419,32 @@ for k in range(n_steps):
 | 参数 | 默认值 | 效果 |
 |------|--------|------|
 | `Q_pos` | 10.0 | 位置跟踪权重（增大以获得更紧密的跟踪） |
-| `Q_vel` | 1.0 | 速度跟踪权重 |
-| `R` | 0.1 | 输入惩罚（减小以允许更大的控制动作） |
+| `Q_Δu` | 0.5 | 控制输入变化率惩罚权重（增大以提高平滑性，减少抖动） |
+| `R` | 0.1 | 控制输入惩罚（期望速度的平滑性惩罚，减小以允许更大的控制动作） |
 | `n_horizon` | 30 | 预测时域（增大以更好地保持轨迹形状） |
+
+**注意**：由于系统是一阶的，不再有速度跟踪权重参数。
 
 ### 概率 MPC
 
 | 参数 | 默认值 | 效果 |
 |------|--------|------|
-| `tau`（阈值） | 0.1 | 控制 \(\alpha(t)\) 对不确定性的敏感性 |
+| `alpha_threshold` | 0.0001 | Alpha权重计算的阈值参数（较小的值：更强调目标项；较大的值：更强调轨迹跟踪） |
+| `R` | 0.5 | 控制输入惩罚（期望速度的平滑性惩罚，从0.1增加到0.5以减少"直接冲向目标"的倾向） |
 | `num_inducing` | 100 | GP 诱导点（增大以提高精度，减小以提高速度） |
 | `max_iters` | 200 | GP 优化迭代次数 |
+
+**注意**：概率 MPC 已移除目标项和终端约束，仅通过轨迹跟踪项实现跟踪。
+
+## 已知问题
+
+### 标准 MPC
+
+- **速度改变后的不确定性问题**：在应用速度改变后，标准 MPC 可能存在不确定的问题，可能需要修正。具体表现和原因待进一步调查。
+
+### 概率 MPC
+
+- **终点约束问题**：如果增加终点位置作为约束（硬约束或软约束），即使权重非常小（如 \(10^{-6}\)），轨迹也会变成直线。这是代码实现的问题，等待修复。当前实现已移除终端约束，仅通过轨迹跟踪项实现跟踪。
 
 ## 参考文献
 
