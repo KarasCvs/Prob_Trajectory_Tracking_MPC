@@ -55,7 +55,7 @@ def main(num_replanning: int = 0,
         use_real_trajectory: 是否使用真实轨迹（从H5数据集加载）
         dataset_path: 数据集路径（当使用真实轨迹时必需）
         num_steps: 仿真步数（默认100）
-        observation_noise_std: 观测位置的高斯噪声标准差（默认0表示无噪声）。
+        observation_noise_std: 观测噪声标准差（同时作用于当前位置与终点；每次 replan 时对观测终点加噪；误差仍按真实终点算；0表示无噪声）。
                                扰动仅加在 MPC 观测到的位置上，真实状态/仿真不扰动。
     
     Args:
@@ -74,7 +74,7 @@ def main(num_replanning: int = 0,
     print(f"Alpha阈值参数: {alpha_threshold}")
     print(f"注意: estimate_velocity参数已废弃，系统现在是一阶系统，不会产生旋转")
     if observation_noise_std > 0:
-        print(f"观测噪声: 标准差={observation_noise_std}（仅作用于 MPC 观测，真实轨迹不变）")
+        print(f"观测噪声: 标准差={observation_noise_std}（作用于当前位置与终点观测，真实轨迹与误差仍按真实值算）")
 
     # ========== 1. 创建系统模型 ==========
     # 注意：如果使用真实轨迹，维度可能会在加载轨迹后更新
@@ -498,6 +498,8 @@ def main(num_replanning: int = 0,
     else:
         replan_steps = np.array([], dtype=int)
 
+    # 终点观测噪声：每次 replan 时对「观测到的终点」加噪，MPC 跟踪该观测终点；误差仍用真实终点 vs 停止位置
+    observed_goal = np.asarray(actual_end_mean).flatten().copy()
     print(f"   仿真步数: {n_steps}")
     print(f"   开始仿真循环...\n")
 
@@ -543,19 +545,22 @@ def main(num_replanning: int = 0,
         if num_replanning > 0 and k in replan_steps:
             replan_count += 1
             remaining = num_steps - k
+            if observation_noise_std > 0:
+                observed_goal = np.asarray(actual_end_mean).flatten().copy()
+                observed_goal[:dimension] += np.random.randn(dimension) * observation_noise_std
             if replan_count <= 3 or (k + 1) % max(1, n_steps // 5) == 0:
                 print(f"   [步骤 {k}] 重规划 #{replan_count}：重观测当前状态，沿用同一 GP 轨迹剩余 {remaining} 步")
 
-        # 用预计算参考更新 TVP（ref 为整条轨迹，当前用 ref[k]、ref[k+1]、...，等价于 ref[k:]）
+        # 用预计算参考更新 TVP；MPC 的终点/终端约束用 observed_goal（可能带噪），误差仍按 actual_end_mean 算
         update_mpc_from_precomputed_ref(
             mpc,
             ref_mean_traj,
             ref_var_traj,
             current_step=k,
             num_steps=num_steps,
-            goal_mean=actual_end_mean,
+            goal_mean=observed_goal,
             goal_variance=goal_variance,
-            actual_end_mean=actual_end_mean,
+            actual_end_mean=observed_goal,
             alpha_threshold=alpha_threshold,
             terminal_index=terminal_index,
             enable_terminal_constraint=enable_terminal_constraint,
@@ -1181,7 +1186,7 @@ if __name__ == '__main__':
     parser.add_argument('--observation-noise-std',
                         type=float,
                         default=0.0,
-                        help='观测位置的高斯噪声标准差（仅作用于MPC观测，0表示无噪声）')
+                        help='观测噪声标准差（同时作用于当前位置与终点；每次replan时对观测终点加噪；误差仍按真实终点算；0表示无噪声）')
 
     args = parser.parse_args()
     main(num_replanning=args.num_replanning,

@@ -158,7 +158,7 @@ def main():
     parser.add_argument('--observation-noise-std',
                         type=float,
                         default=0.0,
-                        help='观测位置的高斯噪声标准差（仅ProbMPC，单位与位置一致；0表示无噪声）')
+                        help='观测噪声标准差（仅ProbMPC，同时作用于当前位置与终点；每次replan时对观测终点加噪；误差仍按真实终点算；0表示无噪声）')
 
     args = parser.parse_args()
 
